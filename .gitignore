@@ -1,0 +1,40 @@
+# Python virtual environment
+.venv/
+venv/
+env/
+ENV/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Simulation results
+result/
+results/
+
+# IDE and editor settings
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# pip cache
+pip-log.txt
+pip-delete-this-directory.txt
+
+# coverage
+.coverage
+htmlcov/
+
+#config and csv
+config.json
+multi.csv
