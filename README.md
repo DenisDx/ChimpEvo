@@ -16,6 +16,8 @@ The application features:
 
 ### Mortality Function
 
+**All the mathematics and logic of the model is implemented in the model.py module**
+
 Per-animal annual death probability is computed as:
 
 $$m(t, \beta) = \alpha \cdot e^{\beta \cdot t} + \Lambda$$
@@ -402,67 +404,6 @@ Initializes empty model. Call `initialize_population()` next.
 
 ---
 
-#### `age_population()`
-**Purpose**: Advance all animals' ages by 1 year.
-
-- **Implementation**: Adds 1 to age column of population tensor
-
-- **Input**: None (modifies `self.population`)
-
-- **Output**: None
-
-- **Example**:
-  ```python
-  model.age_population()
-  # All ages increase by 1: [5, 12, 8] → [6, 13, 9]
-  ```
-
----
-
-#### `get_population_size()`
-**Purpose**: Query current population count.
-
-- **Input**: None
-
-- **Output**: int = number of living animals
-
-- **Example**:
-  ```python
-  n = model.get_population_size()
-  # Returns 1847 if 1847 animals alive
-  ```
-
----
-
-#### `get_ages()`
-**Purpose**: Extract all animal ages as numpy array.
-
-- **Input**: None
-
-- **Output**: np.ndarray of shape `[n_animals]` with dtype float
-
-- **Example**:
-  ```python
-  ages = model.get_ages()
-  # Returns array([5., 12., 8., 14., ...])
-  ```
-
----
-
-#### `get_betas()`
-**Purpose**: Extract all animal betas as numpy array.
-
-- **Input**: None
-
-- **Output**: np.ndarray of shape `[n_animals]` with dtype float
-
-- **Example**:
-  ```python
-  betas = model.get_betas()
-  # Returns array([0.10, 0.15, 0.08, ...])
-  ```
-
----
 
 ### main.py – Simulation Control & Output
 
