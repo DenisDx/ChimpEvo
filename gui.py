@@ -62,10 +62,16 @@ class SimulationGUI:
         else:
             return DEFAULT_SETTINGS.copy()
 
-    def _save_config(self):
-        """Save configuration to file"""
-        with open(self.config_file, "w") as f:
+    def _save_config(self, file_path=None):
+        """Save configuration to file
+
+        Args:
+            file_path: optional target path; defaults to current config file
+        """
+        target_file = file_path or self.config_file
+        with open(target_file, "w") as f:
             json.dump(self.config, f, indent=2)
+        self.config_file = target_file
         log(f"Config saved to {self.config_file}")
 
     def _create_widgets(self):
@@ -99,6 +105,7 @@ class SimulationGUI:
         self.stop_btn.pack(side=tk.LEFT, padx=5)
         
         ttk.Button(control_frame, text="Save Config", command=self._on_save_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(control_frame, text="Save Config As...", command=self._on_save_config_as).pack(side=tk.LEFT, padx=5)
         ttk.Button(control_frame, text="Load Config", command=self._on_load_config).pack(side=tk.LEFT, padx=5)
 
     def _create_settings_tab(self, parent):
@@ -108,7 +115,10 @@ class SimulationGUI:
         device_frame.pack(fill=tk.X, pady=5, padx=5)
         
         available_cuda = torch.cuda.is_available()
-        self.device_var = tk.StringVar(value=self.config.get("device", "cuda" if available_cuda else "cpu"))
+        selected_device = self.config.get("device", "cuda" if available_cuda else "cpu")
+        if not available_cuda:
+            selected_device = "cpu"
+        self.device_var = tk.StringVar(value=selected_device)
         
         ttk.Radiobutton(device_frame, text="CUDA (GPU)" if available_cuda else "CUDA (not available)", 
                        variable=self.device_var, value="cuda", 
@@ -388,7 +398,11 @@ class SimulationGUI:
 
     def _load_config_to_ui(self):
         """Load config values into UI fields"""
-        self.device_var.set(self.config.get("device", "cuda"))
+        requested_device = self.config.get("device", "cuda")
+        # Force CPU selection in UI when CUDA backend is unavailable.
+        if requested_device == "cuda" and not torch.cuda.is_available():
+            requested_device = "cpu"
+        self.device_var.set(requested_device)
         for param, var in self.setting_vars.items():
             var.set(str(self.config.get(param, DEFAULT_SETTINGS.get(param, ""))))
 
@@ -397,6 +411,22 @@ class SimulationGUI:
         self._update_config_from_ui()
         self._save_config()
         messagebox.showinfo("Success", "Configuration saved")
+
+    def _on_save_config_as(self):
+        """Save As button handler"""
+        if not self._update_config_from_ui():
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".json",
+            filetypes=[("JSON files", "*.json")],
+            initialfile=Path(self.config_file).name
+        )
+        if not file_path:
+            return
+
+        self._save_config(file_path)
+        messagebox.showinfo("Success", f"Configuration saved to {file_path}")
 
     def _on_load_config(self):
         """Load button handler"""

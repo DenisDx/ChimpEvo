@@ -106,8 +106,9 @@ class Model:
         """Apply mutation to offspring beta value
         
         Two-outcome model:
-        - With mutation_probability: new random value from [-X+S*X, X+S*X]
-        - Otherwise: average of two parents
+                - With mutation_probability: random shift from [-X+S*X, X+S*X] is
+                    added to average of two parents
+                - Otherwise: average of two parents
         
         Args:
             parent_beta1 (float): first parent beta
@@ -116,16 +117,18 @@ class Model:
         Returns:
             float: offspring beta (unbounded, can be negative)
         """
+        base_beta = (parent_beta1 + parent_beta2) / 2.0
+
         if random.random() < self.settings["mutation_probability"]:
-            # Mutation: random draw from interval
+            # Mutation: draw shift and add it to parental average
             x = self.settings["mutation_x"]
             s = self.settings["mutation_s"]
             lower = -x + s * x
             upper = x + s * x
-            return random.uniform(lower, upper)
+            return base_beta + random.uniform(lower, upper)
         else:
             # No mutation: average of parents
-            return (parent_beta1 + parent_beta2) / 2.0
+            return base_beta
 
     def apply_reproduction(self):
         """Reproduce to fill empty niches up to max_population
@@ -171,29 +174,13 @@ class Model:
         return births
 
     def age_population(self):
-        """Increment age of all animals by 1 year"""
         self.population[:, 0] += 1
 
     def get_ages(self):
-        """Get array of all animal ages
-        
-        Returns:
-            np.ndarray: animal ages
-        """
         return self.population[:, 0].detach().cpu().numpy()
 
     def get_betas(self):
-        """Get array of all animal betas
-        
-        Returns:
-            np.ndarray: animal beta values
-        """
         return self.population[:, 1].detach().cpu().numpy()
 
     def get_population_size(self):
-        """Get current population size
-        
-        Returns:
-            int: number of animals
-        """
         return len(self.population)

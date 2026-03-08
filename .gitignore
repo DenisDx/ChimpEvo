@@ -35,6 +35,6 @@ pip-delete-this-directory.txt
 .coverage
 htmlcov/
 
-#config and csv
-config.json
+# additional files to ignore
 multi.csv
+config.json

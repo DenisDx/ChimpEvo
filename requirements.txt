@@ -1,3 +1,4 @@
 torch>=2.0.0
 numpy>=1.21.0
-matplotlib>=3.3.0Pillow>=9.0.0
+matplotlib>=3.3.0
+Pillow>=9.0.0

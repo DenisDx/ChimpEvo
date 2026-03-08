@@ -36,7 +36,7 @@ Where:
 When offspring are produced during reproduction, one of two outcomes occurs with specified probabilities:
 
 **With probability `mutation_probability`** (mutation occurs):
-$$\beta_{new} = \text{Uniform} \left( [-X + SX, X + SX] \right)$$
+$$\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \text{Uniform} \left( [-X + SX, X + SX] \right)$$
 
 **With probability `(1 - mutation_probability)`** (no mutation):
 $$\beta_{new} = \frac{\beta_1 + \beta_2}{2}$$
@@ -50,7 +50,8 @@ Where:
 
 **Example**: If $X = 2$ and $S = 0.5$:
 - Mutation interval: $[-2 + 0.5 \times 2, 2 + 0.5 \times 2] = [-1, 3]$
-- With `mutation_probability`: $\beta_{new} = \text{Uniform}(-1, 3)$
+- With `mutation_probability`: draw shift $\Delta\beta = \text{Uniform}(-1, 3)$, then
+  $\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \Delta\beta$
 - Without mutation: $\beta_{new} = \frac{\beta_1 + \beta_2}{2}$
 
 **Note**: β values are unbounded (can be negative or arbitrarily large); extreme values affect mortality calculation.
