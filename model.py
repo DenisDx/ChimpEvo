@@ -131,11 +131,11 @@ class Model:
             return base_beta
 
     def apply_reproduction(self):
-        """Reproduce to fill empty niches up to max_population
+        """Reproduce to fill empty niches up to reproduction capacity
         
-        Selects two mature parents (age > mature_age) uniformly at random
-        (with replacement), creates one offspring with mutated beta, repeats
-        until population reaches max_population.
+        Selects two mature parents (age >= mature_age) uniformly at random
+        (with replacement), creates one offspring with mutated beta.
+        Annual growth is limited by mature_count * fecundity.
         
         Returns:
             int: number of offspring born
@@ -143,17 +143,24 @@ class Model:
         births = 0
         max_pop = self.settings["max_population"]
         mature_age = self.settings["mature_age"]
+        fecundity = self.settings["fecundity"]
         
-        # Find all mature animals (age > mature_age)
-        mature_mask = self.population[:, 0] > mature_age
+        # Find all mature animals (age >= mature_age)
+        mature_mask = self.population[:, 0] >= mature_age
         mature_indices = torch.where(mature_mask)[0].cpu().numpy()
         
         # Need at least 2 mature animals to reproduce
         if len(mature_indices) < 2:
             return 0
         
-        # Breed until population reaches max
-        while len(self.population) < max_pop:
+        # Calculate target population based on fecundity
+        current_pop = len(self.population)
+        mature_count = len(mature_indices)
+        max_growth = int(mature_count * fecundity)
+        target_pop = min(current_pop + max_growth, max_pop)
+        
+        # Breed until population reaches target
+        while len(self.population) < target_pop:
             # Random parent selection (with replacement)
             parent_idx1, parent_idx2 = np.random.choice(
                 mature_indices,

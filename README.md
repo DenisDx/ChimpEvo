@@ -62,8 +62,10 @@ Each simulation year proceeds in order:
 
 1. **Reproduction Phase**: 
    - Calculate empty niches (deaths from previous year)
-   - Randomly select pairs of sexually mature animals (age > `mature_age`)
-   - Create offspring with mutated/inherited β until population reaches `max_population`
+   - Count mature animals (age ≥ `mature_age`)
+   - Maximum annual growth limited by: mature_count × `fecundity`
+   - Randomly select pairs of sexually mature animals
+   - Create offspring with mutated/inherited β until reaching min(current + mature_count × fecundity, max_population)
    - New animals born with age = 0
 
 2. **Aging Phase**: 
@@ -203,6 +205,7 @@ Single-run configuration file with all parameters:
   "alpha": 0.001,
   "beta_initial": 0.11,
   "mature_age": 12,
+  "fecundity": 1.0,
   "mutation_probability": 0.1,
   "mutation_x": 1.0,
   "mutation_s": 0.0,
@@ -225,6 +228,7 @@ Single-run configuration file with all parameters:
 | alpha | float | 0.001 | [0, 0.1] | Age parameter in mortality (α) |
 | beta_initial | float | 0.11 | [0, 1] | Initial genetic parameter (ß) for all animals |
 | mature_age | int | 12 | [1, 50] | Minimum age for sexual maturity/reproduction |
+| fecundity | float | 1.0 | [0, 10] | Maximum offspring per mature animal per year (controls annual growth rate) |
 | mutation_probability | float | 0.1 | [0, 0.5] | Probability that offspring undergo mutation (vs inheriting average) |
 | mutation_x | float | 1.0 | [0, 10] | Effect size (X): defines mutation interval width |
 | mutation_s | float | 0.0 | [-1, 1] | Asymmetry (S): skews mutation interval toward positive/negative |
@@ -377,12 +381,13 @@ Initializes empty model. Call `initialize_population()` next.
 ---
 
 #### `apply_reproduction()`
-**Purpose**: Breed animals to fill population back to carrying capacity.
+**Purpose**: Breed animals to fill population up to reproduction capacity.
 
 - **Algorithm**:
-  1. Find all mature animals (age > `mature_age`)
+  1. Find all mature animals (age ≥ `mature_age`)
   2. If < 2 mature, return 0 (cannot breed)
-  3. While population < `max_population`:
+  3. Calculate target population = min(current + mature_count × fecundity, max_population)
+  4. While population < target:
      - Randomly select 2 mature parents (with replacement)
      - Create offspring with mutated beta
      - Add child (age 0) to population
@@ -392,8 +397,9 @@ Initializes empty model. Call `initialize_population()` next.
 - **Output**: int = number of offspring born
 
 - **Parameters Used**:
-  - `settings["max_population"]` – target size
+  - `settings["max_population"]` – absolute population limit
   - `settings["mature_age"]` – minimum breeding age
+  - `settings["fecundity"]` – max offspring per mature animal per year
 
 - **Example**:
   ```python

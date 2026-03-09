@@ -7,6 +7,7 @@ DEFAULT_SETTINGS = {
     "alpha": 0.001,   # age-related mortality multiplier (α)
     "beta_initial": 0.11,  # initial genetic parameter (ß)
     "mature_age": 12,  # minimum age for reproduction
+    "fecundity": 1.0,  # max offspring per mature animal per year
     "mutation_probability": 0.1,  # probability of mutation per reproduction
     "mutation_x": 1.0,  # effect size of mutations (X)
     "mutation_s": 0.0,  # asymmetry of mutations (S), range [-1, 1]
@@ -27,6 +28,7 @@ PARAMETER_RANGES = {
     "alpha": (0.0, 0.1),
     "beta_initial": (0.0, 1.0),
     "mature_age": (1, 50),
+    "fecundity": (0.0, 10.0),
     "mutation_probability": (0.0, 0.5),
     "mutation_x": (0.0, 10.0),
     "mutation_s": (-1.0, 1.0),
@@ -45,6 +47,7 @@ PARAMETER_DESCRIPTIONS = {
     "alpha": "Age-related mortality (α)",
     "beta_initial": "Initial genetic parameter (β)",
     "mature_age": "Min age for reproduction",
+    "fecundity": "Max offspring per mature animal/year",
     "mutation_probability": "Mutation chance per birth",
     "mutation_x": "Mutation effect size (X)",
     "mutation_s": "Mutation asymmetry (S)",
@@ -65,6 +68,7 @@ PARAMETER_GROUPS = {
         "alpha",
         "beta_initial",
         "mature_age",
+        "fecundity",
         "mutation_probability",
         "mutation_x",
         "mutation_s",
