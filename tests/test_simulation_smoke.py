@@ -60,6 +60,22 @@ def test_step_collects_current_v1_statistics(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_run_reports_each_generated_graph_frame(tmp_path, monkeypatch):
+    """Report the year whenever a simulation generates a graph frame."""
+    monkeypatch.chdir(tmp_path)
+    simulation = PopulationSimulation(make_settings())
+    simulation._generate_year_graphs = Mock()
+    generated_frames = []
+
+    simulation.run(
+        should_cancel=lambda: simulation.year >= 1,
+        graph_callback=lambda output_dir, year: generated_frames.append((output_dir, year)),
+    )
+
+    assert generated_frames == [(simulation.output_dir, 0)]
+
+
+@pytest.mark.smoke
 def test_population_below_two_stops_after_completed_year(tmp_path, monkeypatch):
     """Stop the current v1 simulation when fewer than two animals remain."""
     monkeypatch.chdir(tmp_path)

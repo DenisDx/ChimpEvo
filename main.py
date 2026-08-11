@@ -89,6 +89,7 @@ class PopulationSimulation:
         # Beta occurrence graph range (sticky: expands but never shrinks)
         self.beta_range_min = None
         self.beta_range_max = None
+        self.last_generated_graph_year = None
         if self.has_beta_field and "beta_initial" in self.settings:
             beta_init = self.settings["beta_initial"]
             self.beta_range_min = -beta_init / 10.0
@@ -523,6 +524,7 @@ class PopulationSimulation:
             
             if self.stats_collected_count % graph_period == 0:
                 self._generate_year_graphs(self.year)
+                self.last_generated_graph_year = self.year
             
             self.stats_collected_count += 1
 
@@ -540,19 +542,27 @@ class PopulationSimulation:
         
         return True
 
-    def run(self, should_cancel=None):
-        """Run until completion or a cooperative cancellation request."""
+    def run(self, should_cancel=None, graph_callback=None):
+        """Run until completion and report each generated graph frame."""
         log(f"Starting simulation: {self.settings['tag']}")
         self._log_startup_info()
         self.start_time = time.perf_counter()
         self.was_cancelled = False
+        reported_graph_year = None
 
         while True:
             if should_cancel is not None and should_cancel():
                 self.was_cancelled = True
                 log("Stop: cancellation requested")
                 break
-            if not self.step():
+            has_next = self.step()
+            if (
+                graph_callback is not None
+                and self.last_generated_graph_year != reported_graph_year
+            ):
+                graph_callback(self.output_dir, self.last_generated_graph_year)
+                reported_graph_year = self.last_generated_graph_year
+            if not has_next:
                 break
 
         # Generate graph for final year if not already generated
@@ -565,6 +575,12 @@ class PopulationSimulation:
                 final_year = self.results[-1]["year"]
                 log(f"Generating final year graph for year {final_year}")
                 self._generate_year_graphs(final_year)
+                self.last_generated_graph_year = final_year
+        if (
+            graph_callback is not None
+            and self.last_generated_graph_year != reported_graph_year
+        ):
+            graph_callback(self.output_dir, self.last_generated_graph_year)
 
         total_time_sec = time.perf_counter() - self.start_time
         avg_iteration_time_sec = total_time_sec / self.year if self.year > 0 else 0.0
@@ -716,13 +732,19 @@ class PopulationSimulation:
         return str(output_dir)
 
 
-def run_simulation(config_path="config.json", should_cancel=None, return_completion=False):
+def run_simulation(
+    config_path="config.json",
+    should_cancel=None,
+    return_completion=False,
+    graph_callback=None,
+):
     """Main entry point for simulation from command line or batch
     
     Args:
         config_path: configuration path or in-memory settings
         should_cancel: optional callback checked between simulation years
         return_completion: include successful-completion status in the return value
+        graph_callback: optional callback receiving output directory and generated year
         
     Returns:
         results (list of dicts)
@@ -736,7 +758,10 @@ def run_simulation(config_path="config.json", should_cancel=None, return_complet
     
     # Run simulation
     sim = PopulationSimulation(settings)
-    results = sim.run(should_cancel=should_cancel)
+    results = sim.run(
+        should_cancel=should_cancel,
+        graph_callback=graph_callback,
+    )
     
     # Export results
     completed = not sim.was_cancelled

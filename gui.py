@@ -606,12 +606,18 @@ class SimulationGUI:
             """Schedule one batch status update on the Tk event loop."""
             self.root.after(0, self._update_batch_status, completed, total, tag, status)
 
+        def report_graph(output_dir, year):
+            """Queue one generated batch graph frame for the GUI viewer."""
+            self._pending_graph_update = (str(output_dir), year)
+            self.root.after(0, self._show_batch_graphs)
+
         try:
             run_batch(
                 self.batch_path,
                 self.config_file,
                 should_cancel=lambda: self.batch_cancel_requested,
                 progress_callback=report_progress,
+                graph_callback=report_graph,
             )
         except Exception as error:
             self.root.after(0, messagebox.showerror, "Batch error", str(error))
@@ -621,6 +627,10 @@ class SimulationGUI:
     def _update_batch_status(self, completed, total, tag, status):
         """Display one batch runner progress event."""
         self.batch_status_var.set(f"{completed}/{total}: {tag} ({status})")
+
+    def _show_batch_graphs(self):
+        """Switch to Progress when the active batch run generates a graph frame."""
+        self.notebook.select(1)
 
     def _finish_batch(self):
         """Restore Batch tab controls after the worker exits."""
@@ -1249,6 +1259,14 @@ class SimulationGUI:
         ttk.Button(buttons, text="Yes", command=confirm).pack(side=tk.LEFT)
         ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
         dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.update_idletasks()
+        dialog_x = self.root.winfo_rootx() + (
+            self.root.winfo_width() - dialog.winfo_reqwidth()
+        ) // 2
+        dialog_y = self.root.winfo_rooty() + (
+            self.root.winfo_height() - dialog.winfo_reqheight()
+        ) // 2
+        dialog.geometry(f"+{max(0, dialog_x)}+{max(0, dialog_y)}")
         dialog.grab_set()
         self.root.wait_window(dialog)
         return choice["replace"]

@@ -234,7 +234,13 @@ def _rebuild_batch_artifacts(metadata, rows):
     _render_metagraphs(metadata, rows, result_dir)
 
 
-def run_batch(csv_path="multi.csv", config_path="config.json", should_cancel=None, progress_callback=None):
+def run_batch(
+    csv_path="multi.csv",
+    config_path="config.json",
+    should_cancel=None,
+    progress_callback=None,
+    graph_callback=None,
+):
     """Run multiple simulations with parameter variants
     
     Args:
@@ -282,6 +288,7 @@ def run_batch(csv_path="multi.csv", config_path="config.json", should_cancel=Non
     total_count = len(variants)
     should_cancel = should_cancel or (lambda: False)
     progress_callback = progress_callback or (lambda completed, total, tag, status: None)
+    graph_callback = graph_callback or (lambda output_dir, year: None)
     
     for i, variant in enumerate(variants):
         tag = variant["tag"]
@@ -309,6 +316,7 @@ def run_batch(csv_path="multi.csv", config_path="config.json", should_cancel=Non
                 config,
                 should_cancel=should_cancel,
                 return_completion=True,
+                graph_callback=graph_callback,
             )
             if not completed:
                 partial_output_dir = Path("result") / config.get("tag", "default")

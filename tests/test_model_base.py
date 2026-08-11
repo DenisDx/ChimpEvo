@@ -6,6 +6,7 @@ import torch
 
 from model import Model
 from model_base import Model_base
+from model_base_fast import Model_base_fast
 from settings import DEFAULT_SETTINGS
 
 
@@ -65,6 +66,32 @@ def test_model_base_preserves_current_beta_model_behavior():
     assert deaths == 0
     torch.testing.assert_close(population[:, 0], expected_ages)
     torch.testing.assert_close(population[:, 1], expected_betas)
+
+
+@pytest.mark.smoke
+def test_model_base_fast_creates_batched_offspring_up_to_capacity():
+    """Create one device-side child batch without exceeding population capacity."""
+    settings = make_settings()
+    settings.update({
+        "max_population": 5,
+        "mature_age": 2,
+        "fecundity": 2.0,
+        "mutation_probability": 0.0,
+    })
+    model = Model_base_fast(settings, torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 0.10],
+        [4.0, 0.30],
+        [1.0, 0.50],
+    ]))
+
+    births = model.apply_reproduction()
+
+    assert births == 2
+    assert model.last_born == 2
+    assert model.population.shape == (5, 2)
+    torch.testing.assert_close(model.population[-2:, 0], torch.zeros(2))
+    assert torch.all((model.population[-2:, 1] >= 0.10) & (model.population[-2:, 1] <= 0.30))
 
 
 @pytest.mark.smoke

@@ -73,6 +73,8 @@ def test_project_discovery_includes_default_model():
     project_root = Path(__file__).resolve().parents[1]
 
     assert "model_base" in discover_models(project_root)
+    assert "model_base_fast" in discover_models(project_root)
+    assert load_model_class("model_base_fast", project_root).__name__ == "Model_base_fast"
 
 
 @pytest.mark.smoke
