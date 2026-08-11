@@ -1,193 +1,277 @@
-"""
-Mathematical model for chimp population dynamics
-Core age-structured population model with stochastic mortality and reproduction
-"""
+"""Generic population-model lifecycle and tensor access."""
+
+import builtins
+from types import MappingProxyType
 
 import torch
-import numpy as np
-import random
 
 
 class Model:
-    """Age-structured population model with mutation-driven evolution
-    
-    State: population tensor [n_animals, 2] where columns are [age, beta]
-    - age: animal age in years
-    - beta: Gompertz mortality parameter (sagging of log mortality with age)
-    
-    Dynamics:
-    1. Mortality: m(t) = α * exp(β*t) + Λ (Gompertz + baseline)
-    2. Reproduction: mature females reproduce; offspring get mutated parental beta
-    3. Aging: population ages by 1 year per iteration
-    """
+    """Provide shared age-based behavior for dynamic population models."""
 
     def __init__(self, settings, device):
-        """Initialize model with parameters
-        
-        Args:
-            settings (dict): configuration with model parameters
-            device (torch.device): cuda or cpu
-        """
+        """Store settings, device, population schema, and annual counters."""
         self.settings = settings
         self.device = device
-        self.population = None  # Will be initialized via initialize_population()
+        field_declarations = self.add_population_fields()
+        if not isinstance(field_declarations, dict):
+            raise TypeError("add_population_fields() must return a dict")
 
-    def initialize_population(self, initial_population, initial_age_max, beta_initial):
-        """Initialize population with random ages and uniform beta
-        
-        Args:
-            initial_population (int): number of animals to create
-            initial_age_max (int): maximum initial age (random 0..max)
-            beta_initial (float): initial beta value for all animals
-        """
+        field_metadata = {}
+        for field_name, metadata in field_declarations.items():
+            if not isinstance(field_name, str) or not field_name:
+                raise ValueError("Population field names must be non-empty strings")
+            if not isinstance(metadata, dict):
+                raise TypeError(f"Population field metadata must be a dict: {field_name}")
+            field_metadata[field_name] = MappingProxyType(dict(metadata))
+
+        self.population_field_metadata = MappingProxyType(field_metadata)
+        self.population_fields = MappingProxyType({
+            field_name: column
+            for column, field_name in enumerate(field_declarations)
+        })
+        self.population = None
+        self.last_born = 0
+        self.last_death = 0
+
+    @staticmethod
+    def add_population_fields():
+        """Declare ordered population fields and their public metadata."""
+        return {"age": {"public": True}}
+
+    @staticmethod
+    def add_settings():
+        """Declare generic model settings."""
+        return {
+            "seed": {
+                "description": "Random seed; zero selects a random seed",
+                "default": 0,
+                "type": "int",
+            },
+        }
+
+    @staticmethod
+    def add_values():
+        """Declare core scalar values returned by every population model."""
+        return {
+            "count": {"title": "Population", "annual": True, "final": True, "format": "d"},
+            "avg_age": {"title": "Average age", "annual": True, "final": True, "format": ".4f"},
+            "born": {"title": "Born", "annual": True, "final": False, "format": "d"},
+            "dead": {"title": "Dead", "annual": True, "final": False, "format": "d"},
+            "prop_aging": {"title": "Proportion aging", "annual": True, "final": False, "format": ".4f"},
+        }
+
+    @staticmethod
+    def add_graphs():
+        """Declare the shared age distribution graph."""
+        return [{
+            "filename": "age_distribution",
+            "title": "Age Distribution",
+            "values": ["age"],
+            "labels": ["Age"],
+            "type": "distr",
+            "annual": True,
+            "final": True,
+            "animated": True,
+        }]
+
+    @staticmethod
+    def add_metagraphs():
+        """Declare no aggregate batch graphs for the generic model."""
+        return []
+
+    @staticmethod
+    def add_batch():
+        """Declare no default batch CSV for the generic model."""
+        return ""
+
+    def _validate_population_rows(self, rows):
+        """Validate tensor shape, width, dtype, and device against the schema."""
+        if not isinstance(rows, torch.Tensor):
+            raise TypeError("Population rows must be a torch.Tensor")
+        if rows.ndim != 2:
+            raise ValueError("Population rows must be a 2D tensor")
+
+        expected_width = len(self.population_fields)
+        if rows.shape[1] != expected_width:
+            raise ValueError(f"Population rows must contain {expected_width} columns")
+        if not rows.is_floating_point():
+            raise TypeError("Population rows must use a floating-point dtype")
+        expected_device = torch.device(self.device)
+        wrong_device_type = rows.device.type != expected_device.type
+        wrong_explicit_index = (
+            expected_device.index is not None
+            and rows.device.index != expected_device.index
+        )
+        if wrong_device_type or wrong_explicit_index:
+            raise ValueError(f"Population rows must use device {self.device}")
+
+    def _set_population(self, rows):
+        """Validate and set the complete population tensor."""
+        self._validate_population_rows(rows)
+        self.population = rows
+
+    def _append_population_rows(self, rows):
+        """Validate and append complete animal rows to the population."""
+        self._validate_population_rows(rows)
+        if self.population is None:
+            self.population = rows
+            return
+        self.population = torch.cat([self.population, rows], dim=0)
+
+    def initialize_population(self):
+        """Initialize an age-only population from model settings."""
+        initial_population = int(self.settings["initial_population"])
+        initial_age_max = int(self.settings["initial_age_max"])
         ages = torch.randint(
-            0, initial_age_max + 1,
-            (initial_population,),
+            0,
+            initial_age_max + 1,
+            (initial_population, 1),
             dtype=torch.float32,
-            device=self.device
+            device=self.device,
         )
-        betas = torch.full(
-            (initial_population,),
-            beta_initial,
-            dtype=torch.float32,
-            device=self.device
-        )
-        self.population = torch.stack([ages, betas], dim=1)
-
-    def calculate_mortality_probability(self, ages, betas):
-        """Calculate per-animal death probability
-        
-        Gompertz mortality model: m(t) = α * exp(β*t) + Λ
-        
-        Args:
-            ages (torch.Tensor): animal ages
-            betas (torch.Tensor): animal beta values
-            
-        Returns:
-            torch.Tensor: death probabilities in [0, 1]
-        """
-        alpha = self.settings["alpha"]
-        lambda_param = self.settings["lambda"]
-        
-        # Gompertz component: accelerating mortality with age
-        mortality = alpha * torch.exp(betas * ages) + lambda_param
-        
-        # Clamp to valid probability range
-        mortality = torch.clamp(mortality, 0.0, 1.0)
-        return mortality
+        self._set_population(ages)
 
     def apply_mortality(self):
-        """Remove animals based on age-dependent death probability
-        
-        Stochastic: each animal dies if random[0,1] < death_probability
-        
-        Returns:
-            int: number of animals that died
-        """
-        if len(self.population) == 0:
-            return 0
-        
-        # Extract age and beta for all animals
-        ages = self.population[:, 0]
-        betas = self.population[:, 1]
-        
-        # Calculate death probabilities and apply stochastic death
-        death_probs = self.calculate_mortality_probability(ages, betas)
-        rand_vals = torch.rand_like(death_probs)
-        survivors = rand_vals >= death_probs
-        
-        # Remove dead animals
-        death_count = (~survivors).sum().item()
-        self.population = self.population[survivors]
-        
-        return death_count
-
-    def mutate_beta(self, parent_beta1, parent_beta2):
-        """Apply mutation to offspring beta value
-        
-        Two-outcome model:
-                - With mutation_probability: random shift from [-X+S*X, X+S*X] is
-                    added to average of two parents
-                - Otherwise: average of two parents
-        
-        Args:
-            parent_beta1 (float): first parent beta
-            parent_beta2 (float): second parent beta
-            
-        Returns:
-            float: offspring beta (unbounded, can be negative)
-        """
-        base_beta = (parent_beta1 + parent_beta2) / 2.0
-
-        if random.random() < self.settings["mutation_probability"]:
-            # Mutation: draw shift and add it to parental average
-            x = self.settings["mutation_x"]
-            s = self.settings["mutation_s"]
-            lower = -x + s * x
-            upper = x + s * x
-            return base_beta + random.uniform(lower, upper)
-        else:
-            # No mutation: average of parents
-            return base_beta
+        """Keep all animals and return zero deaths."""
+        self.last_death = 0
+        return self.last_death
 
     def apply_reproduction(self):
-        """Reproduce to fill empty niches up to reproduction capacity
-        
-        Selects two mature parents (age >= mature_age) uniformly at random
-        (with replacement), creates one offspring with mutated beta.
-        Annual growth is limited by mature_count * fecundity.
-        
-        Returns:
-            int: number of offspring born
-        """
-        births = 0
-        max_pop = self.settings["max_population"]
-        mature_age = self.settings["mature_age"]
-        fecundity = self.settings["fecundity"]
-        
-        # Find all mature animals (age >= mature_age)
-        mature_mask = self.population[:, 0] >= mature_age
-        mature_indices = torch.where(mature_mask)[0].cpu().numpy()
-        
-        # Need at least 2 mature animals to reproduce
-        if len(mature_indices) < 2:
-            return 0
-        
-        # Calculate target population based on fecundity
-        current_pop = len(self.population)
-        mature_count = len(mature_indices)
-        max_growth = int(mature_count * fecundity)
-        target_pop = min(current_pop + max_growth, max_pop)
-        
-        # Breed until population reaches target
-        while len(self.population) < target_pop:
-            # Random parent selection (with replacement)
-            parent_idx1, parent_idx2 = np.random.choice(
-                mature_indices,
-                size=2,
-                replace=True
-            )
-            parent1 = self.population[parent_idx1]
-            parent2 = self.population[parent_idx2]
-            
-            # Child's beta with possible mutation
-            child_beta = self.mutate_beta(parent1[1].item(), parent2[1].item())
-            
-            # Add new animal (age 0)
-            child = torch.tensor([0.0, child_beta], device=self.device)
-            self.population = torch.cat([self.population, child.unsqueeze(0)])
-            births += 1
-        
-        return births
+        """Create no offspring and return zero births."""
+        self.last_born = 0
+        return self.last_born
 
     def age_population(self):
-        self.population[:, 0] += 1
+        """Increase the registered age field by one year."""
+        self.population[:, self.population_fields["age"]] += 1
+
+    def get_tensor(self, field_name):
+        """Return a population field as a detached CPU NumPy array."""
+        try:
+            column = self.population_fields[field_name]
+        except KeyError as error:
+            raise KeyError(f"Unknown population field: {field_name}") from error
+        return self.population[:, column].detach().cpu().numpy()
 
     def get_ages(self):
-        return self.population[:, 0].detach().cpu().numpy()
+        """Return ages through the named population-field API."""
+        return self.get_tensor("age")
 
-    def get_betas(self):
-        return self.population[:, 1].detach().cpu().numpy()
+    def bin_values(
+        self,
+        field_name,
+        bin_count,
+        min=None,
+        max=None,
+        padding_min=0.0,
+        padding_max=0.0,
+        scale=1.0,
+    ):
+        """Aggregate one public population field into device-side intervals."""
+        if field_name not in self.population_fields:
+            raise KeyError(f"Unknown population field: {field_name}")
+        if not self.population_field_metadata[field_name].get("public", False):
+            raise KeyError(f"Population field is not public: {field_name}")
+        if not isinstance(bin_count, int) or bin_count < 1:
+            raise ValueError("bin_count must be a positive integer")
+        if scale <= 0:
+            raise ValueError("scale must be greater than zero")
+        if not (0.0 <= padding_min < 1.0 and 0.0 <= padding_max < 1.0):
+            raise ValueError("padding values must be in [0, 1)")
+        if padding_min + padding_max >= 1.0:
+            raise ValueError("padding_min + padding_max must be less than one")
+
+        column = self.population_fields[field_name]
+        values = self.population[:, column]
+        non_nan_values = values[~torch.isnan(values)]
+        finite_values = non_nan_values[torch.isfinite(non_nan_values)]
+        if finite_values.numel() == 0:
+            return self._empty_bin_result(bin_count, min, max, non_nan_values)
+
+        finite_min = finite_values.min()
+        finite_max = finite_values.max()
+        lower_bound = float(min) if min is not None else finite_min.item()
+        upper_bound = float(max) if max is not None else finite_max.item()
+
+        sorted_values = torch.sort(non_nan_values).values
+        total_count = sorted_values.numel()
+        lower_padding_count = int(total_count * padding_min)
+        if lower_padding_count > 0:
+            lower_index = builtins.min(lower_padding_count, total_count - 1)
+            padded_lower = torch.clamp(sorted_values[lower_index], finite_min, finite_max).item()
+            lower_bound = builtins.max(lower_bound, padded_lower)
+        upper_padding_count = int(total_count * padding_max)
+        if upper_padding_count > 0:
+            upper_index = builtins.max(total_count - upper_padding_count, 0)
+            upper_index = builtins.min(upper_index, total_count - 1)
+            padded_upper = torch.clamp(sorted_values[upper_index], finite_min, finite_max).item()
+            upper_bound = builtins.min(upper_bound, padded_upper)
+
+        if lower_bound == upper_bound and min is None and max is None:
+            lower_bound -= 0.5
+            upper_bound += 0.5
+        if lower_bound >= upper_bound:
+            raise ValueError("Resolved bin range must have min less than max")
+
+        positions = torch.linspace(
+            0.0,
+            1.0,
+            bin_count + 1,
+            dtype=values.dtype,
+            device=values.device,
+        ).pow(float(scale))
+        edges = lower_bound + (upper_bound - lower_bound) * positions
+        in_range = non_nan_values[
+            (non_nan_values >= lower_bound) & (non_nan_values < upper_bound)
+        ]
+        interval_indices = torch.bucketize(in_range, edges[1:-1], right=True)
+        counts = torch.bincount(interval_indices, minlength=bin_count)
+        below_min = (non_nan_values < lower_bound).sum().item()
+        above_max = (non_nan_values >= upper_bound).sum().item()
+        return {
+            "data": [int(count) for count in counts.cpu().tolist()],
+            "min": float(lower_bound),
+            "max": float(upper_bound),
+            "below_min": int(below_min),
+            "above_max": int(above_max),
+        }
+
+    def _empty_bin_result(self, bin_count, min_value, max_value, values):
+        """Return zero bins and infinite overflow counts without finite data."""
+        below_min = 0
+        above_max = 0
+        if min_value is not None:
+            below_min = int((values < float(min_value)).sum().item())
+        if max_value is not None:
+            above_max = int((values >= float(max_value)).sum().item())
+        return {
+            "data": [0] * bin_count,
+            "min": float(min_value) if min_value is not None else None,
+            "max": float(max_value) if max_value is not None else None,
+            "below_min": below_min,
+            "above_max": above_max,
+        }
 
     def get_population_size(self):
+        """Return the current number of animals."""
         return len(self.population)
+
+    def get_values(self):
+        """Return current core scalar values as Python values."""
+        population_size = self.get_population_size()
+        average_age = None
+        if population_size > 0:
+            age_column = self.population_fields["age"]
+            average_age = self.population[:, age_column].mean().item()
+        return {
+            "count": population_size,
+            "avg_age": average_age,
+            "born": self.last_born,
+            "dead": self.last_death,
+            "prop_aging": 0.0,
+        }
+
+    def should_stop(self):
+        """Return no model-specific stop reason."""
+        return None

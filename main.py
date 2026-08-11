@@ -18,7 +18,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import gc
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
-from model import Model
+from model_loader import load_model_class
+from model_metadata import validate_model_metadata
 
 # Global logger callback for GUI integration
 _logger_callback = None
@@ -41,7 +42,7 @@ def log(*args, **kwargs):
 
 def _seed_random_generators(seed):
     """Seed application random generators when a seed is configured."""
-    if seed is None:
+    if seed is None or int(seed) == 0:
         return
 
     seed = int(seed)
@@ -65,37 +66,46 @@ class PopulationSimulation:
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.settings["device"] == "cuda" else "cpu")
         _seed_random_generators(self.settings.get("seed"))
         
-        # Validate ranges
-        for key, (min_val, max_val) in PARAMETER_RANGES.items():
-            if key in self.settings:
-                val = self.settings[key]
-                if not (min_val <= val <= max_val):
-                    log(f"Warning: {key}={val} outside range [{min_val}, {max_val}], clamping")
-                    self.settings[key] = max(min_val, min(val, max_val))
-        
-        # Initialize model with population state
-        self.model = Model(self.settings, self.device)
+        self._validate_settings()
+
+        # Initialize configured dynamic model
+        model_name = self.settings.get("model", "model_base")
+        model_class = load_model_class(model_name)
+        self.model_metadata = validate_model_metadata(model_class)
+        self.model = model_class(self.settings, self.device)
+        self.has_age_field = "age" in self.model.population_fields
+        self.has_beta_field = "beta" in self.model.population_fields
         
         # Simulation state
         self.year = 0
         self.results = []
-        self.yearly_beta_changes = []
         self.total_animals_processed = 0
         self.start_time = None
         self.output_dir = Path("result") / self.settings["tag"]
         self.min_survivorship_exponent = None  # Sticky lower bound exponent (10^x)
-        self.ema_beta_value = None  # EMA of avg_beta (k=0.03)
-        self.consecutive_ema_below_threshold = 0  # Counter for years where ema_change < threshold
         self.stats_collected_count = 0  # Number of times stats have been collected
         # Distribution graph max age (sticky: only expands, never shrinks)
         self.max_age_distribution = None
         # Beta occurrence graph range (sticky: expands but never shrinks)
-        beta_init = self.settings["beta_initial"]
-        self.beta_range_min = -beta_init / 10.0
-        self.beta_range_max = beta_init * 2.0
+        self.beta_range_min = None
+        self.beta_range_max = None
+        if self.has_beta_field and "beta_initial" in self.settings:
+            beta_init = self.settings["beta_initial"]
+            self.beta_range_min = -beta_init / 10.0
+            self.beta_range_max = beta_init * 2.0
         
         self._prepare_output_dir()
         self._init_population()
+
+    def _validate_settings(self):
+        """Clamp configured numeric values to their supported ranges."""
+        for key, (min_val, max_val) in PARAMETER_RANGES.items():
+            if key not in self.settings:
+                continue
+            value = self.settings[key]
+            if not (min_val <= value <= max_val):
+                log(f"Warning: {key}={value} outside range [{min_val}, {max_val}], clamping")
+                self.settings[key] = max(min_val, min(value, max_val))
 
     def _prepare_output_dir(self):
         """Prepare result folder: remove all old files from tag-specific directory"""
@@ -109,52 +119,48 @@ class PopulationSimulation:
     def _init_population(self):
         """Initialize population via model"""
         n = self.settings["initial_population"]
-        self.model.initialize_population(
-            n,
-            self.settings["initial_age_max"],
-            self.settings["beta_initial"]
-        )
+        self.model.initialize_population()
         log(f"Initialized population: {n} animals, device: {self.device}")
 
     def _calculate_yearly_stats(self):
-        """Calculate yearly population statistics
-        
-        Returns:
-            dict with population metrics
-        """
-        if self.model.get_population_size() == 0:
-            return {
-                "year": self.year,
-                "count": 0,
-                "avg_age": 0,
-                "born": 0,
-                "dead": 0,
-                "prop_aging": 0,
-                "avg_beta": 0,
-                "avg_beta_ema": 0,
-            }
-        
-        ages = self.model.get_ages()
-        betas = self.model.get_betas()
-        
-        # TODO: track births/deaths per year (requires state tracking)
-        stats = {
-            "year": self.year,
-            "count": self.model.get_population_size(),
-            "avg_age": float(ages.mean()),
-            "born": 0,  # TODO: track from reproduction phase
-            "dead": 0,  # TODO: track from mortality phase
-            "prop_aging": 0.0,  # TODO: proportion dying of aging
-            "avg_beta": float(betas.mean()),
-            "avg_beta_ema": 0.0,  # Will be filled in step()
-        }
+        """Return the year and model values declared for annual output."""
+        values = self._get_model_values()
+        stats = {"year": self.year}
+        for name, metadata in self.model_metadata["values"].items():
+            if metadata["annual"]:
+                stats[name] = values[name]
         return stats
+
+    def _get_model_values(self):
+        """Return validated public scalar values from the active model."""
+        values = self.model.get_values()
+        if not isinstance(values, dict):
+            raise TypeError("get_values() must return a dict")
+
+        declared_names = set(self.model_metadata["values"])
+        returned_names = set(values)
+        missing_names = declared_names - returned_names
+        extra_names = returned_names - declared_names
+        if missing_names or extra_names:
+            raise ValueError(
+                "get_values() names do not match declarations: "
+                f"missing={sorted(missing_names)}, extra={sorted(extra_names)}"
+            )
+
+        normalized = {}
+        for name, value in values.items():
+            if isinstance(value, torch.Tensor):
+                raise TypeError(f"get_values() must not return Torch tensors: {name}")
+            if isinstance(value, np.generic):
+                value = value.item()
+            if value is not None and not isinstance(value, (str, bool, int, float)):
+                raise TypeError(f"get_values() returned a non-scalar value: {name}")
+            normalized[name] = value
+        return normalized
 
     def _log_startup_info(self):
         """Log startup mode and initial simulation data"""
         mode = "CUDA" if self.device.type == "cuda" else "CPU"
-        ages = self.model.get_ages()
-        betas = self.model.get_betas()
 
         log(f"Run mode: {mode} (device={self.device})")
         log("Initial settings:")
@@ -163,42 +169,23 @@ class PopulationSimulation:
 
         log("Initial population data:")
         log(f"  count = {self.model.get_population_size()}")
-        log(f"  age: min={ages.min():.1f}, max={ages.max():.1f}, avg={ages.mean():.2f}")
-        log(f"  beta: min={betas.min():.4f}, max={betas.max():.4f}, avg={betas.mean():.4f}")
+        if self.has_age_field and self.model.get_population_size() > 0:
+            ages = self.model.get_ages()
+            log(f"  age: min={ages.min():.1f}, max={ages.max():.1f}, avg={ages.mean():.2f}")
+        if self.has_beta_field and self.model.get_population_size() > 0:
+            betas = self.model.get_tensor("beta")
+            log(f"  beta: min={betas.min():.4f}, max={betas.max():.4f}, avg={betas.mean():.4f}")
 
-    def _should_stop(self):
-        """Check stopping conditions"""
-        # Condition 1: population too small
-        pop_size = self.model.get_population_size()
-        if pop_size < 2:
-            log(f"Stop: population too small ({pop_size} animals)")
+    def _should_stop(self, model_stop_reason):
+        """Check core iteration limit and a model-provided stop reason."""
+        if model_stop_reason:
+            log(f"Stop: {model_stop_reason}")
             return True
-        
-        # Condition 2: MAX_ITER reached
+
         max_iter = int(self.settings.get("max_iterations", 100000))
         if self.year >= max_iter:
             log(f"Stop: MAX_ITER ({max_iter}) reached")
             return True
-        
-        # Condition 3: beta stabilization (EMA-based, 3 consecutive years below threshold)
-        if len(self.yearly_beta_changes) > 10:
-            avg_change_first_10 = np.mean(self.yearly_beta_changes[:10])
-            multiplier = self.settings["stop_beta_change_threshold"]
-            threshold = avg_change_first_10 * multiplier
-            
-            if self.year > 11:
-                # Check change in EMA value from previous year
-                ema_change = abs(self.results[-1]["avg_beta_ema"] - self.results[-2]["avg_beta_ema"])
-                
-                if ema_change < threshold:
-                    self.consecutive_ema_below_threshold += 1
-                    if self.consecutive_ema_below_threshold >= 3:
-                        log(f"Stop: beta stabilized (ema_change {ema_change:.6f} < threshold {threshold:.6f} for 3 consecutive years)")
-                        return True
-                else:
-                    # Reset counter if change exceeds threshold
-                    self.consecutive_ema_below_threshold = 0
-        
         return False
 
     def _save_distribution_graph(self, year):
@@ -207,7 +194,7 @@ class PopulationSimulation:
         Args:
             year: current simulation year index
         """
-        if self.model.get_population_size() == 0:
+        if not self.has_age_field or self.model.get_population_size() == 0:
             return
 
         ages = self.model.get_ages().astype(int)
@@ -245,7 +232,11 @@ class PopulationSimulation:
         Args:
             year: current simulation year index
         """
-        if self.model.get_population_size() == 0:
+        if (
+            not self.has_age_field
+            or "lambda" not in self.settings
+            or self.model.get_population_size() == 0
+        ):
             return
 
         ages = self.model.get_ages().astype(int)
@@ -321,10 +312,15 @@ class PopulationSimulation:
         Args:
             year: current simulation year index
         """
-        if self.model.get_population_size() == 0:
+        if (
+            not self.has_beta_field
+            or self.beta_range_min is None
+            or self.beta_range_max is None
+            or self.model.get_population_size() == 0
+        ):
             return
 
-        betas = self.model.get_betas()
+        betas = self.model.get_tensor("beta")
         if len(betas) == 0:
             return
 
@@ -381,16 +377,84 @@ class PopulationSimulation:
         self._save_distribution_graph(year)
         self._save_survivorship_graph(year)
         self._save_beta_occurrence_graph(year)
+        self._generate_model_graphs(annual=True, year=year)
 
-    def _build_animation_gif(self, prefix, output_name):
+    def _generate_model_graphs(self, annual=False, final=False, year=None, output_dir=None):
+        """Render model-declared graphs for one requested output stage."""
+        target_dir = Path(output_dir) if output_dir is not None else self.output_dir
+        for graph in self.model_metadata["graphs"]:
+            if (annual and graph["annual"]) or (final and graph["final"]):
+                suffix = f"_{int(year):07d}" if annual else ""
+                output_path = target_dir / f"{graph['filename']}{suffix}.png"
+                if graph["type"] == "time":
+                    self._save_model_time_graph(graph, output_path)
+                else:
+                    self._save_model_distribution_graph(graph, output_path)
+
+    def _save_model_time_graph(self, graph, output_path):
+        """Render declared scalar histories to one time graph."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for value_name, label in zip(graph["values"], graph["labels"]):
+            points = [
+                (row["year"], row.get(value_name))
+                for row in self.results
+                if row.get(value_name) is not None
+            ]
+            if points:
+                ax.plot(
+                    [point[0] for point in points],
+                    [point[1] for point in points],
+                    linewidth=2,
+                    label=label,
+                )
+        ax.set_xlabel(graph["xlabel"] or "Year")
+        ax.set_title(graph["title"])
+        if len(graph["values"]) > 1:
+            ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+    def _save_model_distribution_graph(self, graph, output_path):
+        """Render independently binned population fields to one distribution graph."""
+        fig, ax = plt.subplots(figsize=(10, 6))
+        for field_name, label in zip(graph["values"], graph["labels"]):
+            bins = self.model.bin_values(
+                field_name,
+                graph["bin_count"],
+                min=graph.get("min"),
+                max=graph.get("max"),
+                padding_min=graph["padding_min"],
+                padding_max=graph["padding_max"],
+                scale=graph["scale"],
+            )
+            if bins["min"] is None or bins["max"] is None:
+                continue
+            positions = np.linspace(0.0, 1.0, graph["bin_count"] + 1) ** graph["scale"]
+            edges = bins["min"] + (bins["max"] - bins["min"]) * positions
+            ax.stairs(bins["data"], edges, label=label, linewidth=2)
+        ax.set_xlabel(graph["xlabel"])
+        ax.set_ylabel("Count")
+        ax.set_title(graph["title"])
+        if len(graph["values"]) > 1:
+            ax.legend()
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+        fig.savefig(output_path, dpi=100, bbox_inches="tight")
+        plt.close(fig)
+
+    def _build_animation_gif(self, prefix, output_name, output_dir=None):
         """Build animation GIF from yearly PNG files
 
         Args:
             prefix: png file prefix (distribution or survivorship)
             output_name: output gif file name
+            output_dir: directory containing frames and receiving the GIF
         """
+        target_dir = Path(output_dir) if output_dir is not None else self.output_dir
         png_files = sorted(
-            self.output_dir.glob(f"{prefix}*.png"),
+            target_dir.glob(f"{prefix}*.png"),
             key=lambda p: int(p.stem.replace(prefix, "")) if p.stem.replace(prefix, "").isdigit() else -1,
         )
         if not png_files:
@@ -399,7 +463,7 @@ class PopulationSimulation:
 
         log(f"Creating {output_name} from {len(png_files)} PNG files")
         frames = [Image.open(file_path).convert("P") for file_path in png_files]
-        gif_file = self.output_dir / output_name
+        gif_file = target_dir / output_name
         frames[0].save(
             gif_file,
             save_all=True,
@@ -428,13 +492,20 @@ class PopulationSimulation:
         
         # Step 3: Mortality (stochastic death)
         deaths = self.model.apply_mortality()
+        model_stop_reason = self.model.should_stop()
         
         # Determine if we should collect statistics this year
         stat_period = int(self.settings.get("stat_generation_period", 1))
         if stat_period < 1:
             stat_period = 1
         
-        should_collect_stats = (self.year % stat_period == 0)
+        max_iterations = int(self.settings.get("max_iterations", 100000))
+        reaches_max_iterations = self.year + 1 >= max_iterations
+        should_collect_stats = (
+            self.year % stat_period == 0
+            or bool(model_stop_reason)
+            or reaches_max_iterations
+        )
         
         # Collect statistics only if it's the right period
         if should_collect_stats:
@@ -443,23 +514,7 @@ class PopulationSimulation:
                 stats["born"] = births
                 stats["dead"] = deaths
             
-            # Calculate EMA of avg_beta with k=0.03
-            if len(self.results) == 0:
-                self.ema_beta_value = stats["avg_beta"]
-                stats["avg_beta_ema"] = stats["avg_beta"]
-            else:
-                k = 0.03
-                self.ema_beta_value = k * stats["avg_beta"] + (1.0 - k) * self.ema_beta_value
-                stats["avg_beta_ema"] = self.ema_beta_value
-            
             self.results.append(stats)
-            
-            # Track beta changes for stopping condition
-            if len(self.results) > 1:
-                change = abs(stats["avg_beta"] - self.results[-2]["avg_beta"])
-            else:
-                change = 0
-            self.yearly_beta_changes.append(change)
             
             # Generate graphs only during stats collection, and only every N stats
             graph_period = int(self.settings.get("graph_generation_period", 1))
@@ -470,25 +525,35 @@ class PopulationSimulation:
                 self._generate_year_graphs(self.year)
             
             self.stats_collected_count += 1
-            
-            log(f"Year {self.year}: pop={stats['count']}, avg_age={stats['avg_age']:.1f}, avg_beta={stats['avg_beta']:.4f}, avg_beta_ema={stats['avg_beta_ema']:.4f}, births={births}, deaths={deaths}")
+
+            value_text = ", ".join(
+                f"{name}={value}"
+                for name, value in stats.items()
+                if name != "year"
+            )
+            log(f"Year {self.year}: {value_text}")
         
         self.year += 1
-        
-        # Check stop conditions (only when we have stats)
-        if should_collect_stats and self._should_stop():
+
+        if self._should_stop(model_stop_reason):
             return False
         
         return True
 
-    def run(self):
-        """Run full simulation until stop condition"""
+    def run(self, should_cancel=None):
+        """Run until completion or a cooperative cancellation request."""
         log(f"Starting simulation: {self.settings['tag']}")
         self._log_startup_info()
         self.start_time = time.perf_counter()
-        
-        while self.step():
-            pass
+        self.was_cancelled = False
+
+        while True:
+            if should_cancel is not None and should_cancel():
+                self.was_cancelled = True
+                log("Stop: cancellation requested")
+                break
+            if not self.step():
+                break
 
         # Generate graph for final year if not already generated
         if self.results:
@@ -528,7 +593,8 @@ class PopulationSimulation:
         years = [r["year"] for r in self.results]
         counts = [r["count"] for r in self.results]
         avg_ages = [r["avg_age"] for r in self.results]
-        avg_betas = [r["avg_beta"] for r in self.results]
+        beta_rows_available = all("avg_beta" in row for row in self.results)
+        avg_betas = [r["avg_beta"] for r in self.results] if beta_rows_available else []
         births = [r.get("born", 0) for r in self.results]
         deaths = [r.get("dead", 0) for r in self.results]
         
@@ -549,12 +615,15 @@ class PopulationSimulation:
         ax2.set_title("Average Age Over Time")
         ax2.grid(True, alpha=0.3)
         
-        # Plot 3: Beta evolution
-        ax3.plot(years, avg_betas, linewidth=2, color="red")
-        ax3.set_xlabel("Year")
-        ax3.set_ylabel("Average Beta")
-        ax3.set_title("Genetic Parameter Evolution")
-        ax3.grid(True, alpha=0.3)
+        # Plot 3: Beta evolution when the active model declares the scalar.
+        if beta_rows_available:
+            ax3.plot(years, avg_betas, linewidth=2, color="red")
+            ax3.set_xlabel("Year")
+            ax3.set_ylabel("Average Beta")
+            ax3.set_title("Genetic Parameter Evolution")
+            ax3.grid(True, alpha=0.3)
+        else:
+            ax3.set_visible(False)
         
         # Plot 4: Birth/death rates
         ax4.bar([y - 0.2 for y in years], births, width=0.4, label="Births", color="green", alpha=0.7)
@@ -571,11 +640,12 @@ class PopulationSimulation:
         log(f"Saved graph to {graph_file}")
         plt.close()
     
-    def export_results(self, output_dir=None):
+    def export_results(self, output_dir=None, successful=False):
         """Export results to CSV and generate graphs
         
         Args:
             output_dir: output directory (default: ./result/tag/)
+            successful: create final.csv only for a completed calculation
             
         Returns:
             output directory path (str)
@@ -591,27 +661,68 @@ class PopulationSimulation:
         # Save CSV
         csv_file = output_dir / "result.csv"
         if self.results:
-            keys = self.results[0].keys()
+            keys = ["year"] + [
+                name for name, metadata in self.model_metadata["values"].items()
+                if metadata["annual"]
+            ]
             with open(csv_file, "w", newline="") as f:
                 writer = csv.DictWriter(f, fieldnames=keys)
                 writer.writeheader()
                 writer.writerows(self.results)
             log(f"Saved results to {csv_file}")
+
+        final_file = output_dir / "final.csv"
+        if successful:
+            values = self._get_model_values()
+            final_names = [
+                name for name, metadata in self.model_metadata["values"].items()
+                if metadata["final"]
+            ]
+            duration_seconds = 0.0
+            if self.start_time is not None:
+                duration_seconds = time.perf_counter() - self.start_time
+            final_row = {
+                "model": self.settings.get("model", "model_base"),
+                "tag": self.settings["tag"],
+                "year": max(self.year - 1, 0),
+                "duration_seconds": duration_seconds,
+            }
+            final_row.update({name: values[name] for name in final_names})
+            final_keys = ["model", "tag", "year", "duration_seconds", *final_names]
+            with open(final_file, "w", newline="") as f:
+                writer = csv.DictWriter(f, fieldnames=final_keys)
+                writer.writeheader()
+                writer.writerow(final_row)
+            log(f"Saved final results to {final_file}")
+        else:
+            final_file.unlink(missing_ok=True)
         
         # Generate graphs
         self._generate_graphs(output_dir)
         self._build_animation_gif("distribution", "distribution.gif")
         self._build_animation_gif("survivorship", "survivorship.gif")
-        self._build_animation_gif("betaoccurrence", "betaoccurrence.gif")
+        if self.has_beta_field:
+            self._build_animation_gif("betaoccurrence", "betaoccurrence.gif")
+        if successful:
+            self._generate_model_graphs(final=True, output_dir=output_dir)
+            for graph in self.model_metadata["graphs"]:
+                if graph["annual"] and graph["animated"]:
+                    self._build_animation_gif(
+                        f"{graph['filename']}_",
+                        f"{graph['filename']}.gif",
+                        output_dir=output_dir,
+                    )
         
         return str(output_dir)
 
 
-def run_simulation(config_path="config.json"):
+def run_simulation(config_path="config.json", should_cancel=None, return_completion=False):
     """Main entry point for simulation from command line or batch
     
     Args:
-        config_path: path to config.json (tag as first CLI arg overrides)
+        config_path: configuration path or in-memory settings
+        should_cancel: optional callback checked between simulation years
+        return_completion: include successful-completion status in the return value
         
     Returns:
         results (list of dicts)
@@ -625,11 +736,14 @@ def run_simulation(config_path="config.json"):
     
     # Run simulation
     sim = PopulationSimulation(settings)
-    results = sim.run()
+    results = sim.run(should_cancel=should_cancel)
     
     # Export results
-    sim.export_results()
+    completed = not sim.was_cancelled
+    sim.export_results(successful=completed)
     
+    if return_completion:
+        return results, completed
     return results
 
 

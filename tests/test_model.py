@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 import torch
 
-from model import Model
+from model_base import Model_base as Model
 from settings import DEFAULT_SETTINGS
 
 
@@ -24,16 +24,19 @@ def deterministic_randomness():
 @pytest.mark.smoke
 def test_initialize_population_contract():
     """Create the expected CPU population tensor and public arrays."""
-    model = Model(make_settings(), torch.device("cpu"))
+    model = Model(
+        make_settings(initial_population=12, initial_age_max=7, beta_initial=0.25),
+        torch.device("cpu"),
+    )
 
-    model.initialize_population(12, 7, 0.25)
+    model.initialize_population()
 
     assert model.population.shape == (12, 2)
     assert model.population.dtype == torch.float32
     assert model.population.device.type == "cpu"
     assert model.get_population_size() == 12
     assert np.all((model.get_ages() >= 0) & (model.get_ages() <= 7))
-    np.testing.assert_allclose(model.get_betas(), 0.25)
+    np.testing.assert_allclose(model.get_tensor("beta"), 0.25)
 
 
 @pytest.mark.smoke

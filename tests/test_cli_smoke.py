@@ -50,4 +50,5 @@ def test_main_cli_completes_with_project_interpreter(tmp_path):
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "Simulation complete" in completed.stdout
     assert (tmp_path / "result" / "cli_smoke" / "result.csv").is_file()
+    assert (tmp_path / "result" / "cli_smoke" / "final.csv").is_file()
     assert (tmp_path / "result" / "cli_smoke" / "results_summary.png").is_file()

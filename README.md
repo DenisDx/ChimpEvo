@@ -4,7 +4,7 @@
 
 ChimpEvo is an agent-based stochastic model that simulates the year-by-year evolution of a chimpanzee population with simplified genetics to study how emerging and inherited mutations affect lifespan.
 
-!!! All the mathematics and logic of the model is implemented in the model.py module !!!
+The generic simulation lifecycle is implemented in `model.py`. The bundled beta/Gompertz mathematics lives in `model_base.py`; additional trusted `model_*.py` files can provide other models.
 
 The application features:
 - **Core simulation engine** (Python + PyTorch) for efficient population dynamics
@@ -16,7 +16,7 @@ The application features:
 
 ### Mortality Function
 
-**All the mathematics and logic of the model is implemented in the model.py module**
+The bundled `Model_base` model implements this beta/Gompertz mortality function.
 
 Per-animal annual death probability is computed as:
 
@@ -145,8 +145,10 @@ Opens a window where you can:
 
 The GUI features three tabs:
 1. **Settings**: Parameter input fields, device selection, save/load config
-2. **Progress**: Real-time logs, statistics output, and live graphs (Age Distribution, Survivorship Curve, Beta Distribution)
-3. **Graphs**: Auto-displays summary graphs after simulation completes
+2. **Progress**: Real-time logs, performance statistics, legacy graphs, and model-declared graph tabs
+3. **Batch**: Editable batch CSV, aggregate progress, Start/Stop controls, and result cleanup
+
+The Settings tab can load a selected model, or load all active model defaults into memory. Defaults and batch rows require explicit Save actions before they replace `config.json` or `multi.csv`.
 
 ### 2. Single Simulation (Console)
 
@@ -155,13 +157,18 @@ python main.py
 ```
 
 Runs one simulation using parameters from `config.json`. Outputs results to `result/[tag]/`:
-- `result.csv` — per-year statistics (year, population count, avg age, births, deaths, avg beta)
+- `result.csv` — model-declared annual statistics
+- `final.csv` — core run metadata and model-declared final values after successful completion
+- `age_distribution_0000005.png` — dynamic annual graph frame with a seven-digit year suffix
+- `age_distribution.png` — dynamic final graph after successful completion
+- `age_distribution.gif` — animation assembled from retained numbered frames after successful completion
+- The default beta model also creates corresponding `beta_distribution` and `beta_evolution` dynamic files
 - `distributionN.png` — age distribution graph for each year `N` (age vs count)
 - `survivorshipN.png` — smooth survivorship curve for each year `N` (log scale)
-- `betaoccurrenceN.png` — beta distribution scatter plot for each year `N` (beta intervals vs count, displayed as circles)
+- `betaoccurrenceN.png` — beta distribution scatter plot for each year `N` when the active model declares a public `beta` field
 - `distribution.gif` — animation from all `distributionN.png` frames
 - `survivorship.gif` — animation from all `survivorshipN.png` frames
-- `betaoccurrence.gif` — animation from all `betaoccurrenceN.png` frames
+- `betaoccurrence.gif` — animation from all `betaoccurrenceN.png` frames when beta output is available
 - `results_summary.png` — 4-subplot summary graph:
   - Population Dynamics (count over time)
   - Average Age Evolution
@@ -178,6 +185,12 @@ Executes multiple simulations with parameter variants:
 - **multi.csv** contains columns matching parameter names and a `tag` column
 - Each row is a separate run, inheriting unchanged parameters from base config.json
 - Results are saved to `result/[tag_from_csv]/`
+- Successful rows append their final values to authoritative `result/result.csv`; a later batch run resumes by skipping compatible completed tags.
+- Each aggregate row stores the original batch values, all resolved model settings, and every field from that run's `final.csv`.
+- Batch tags and parameter rows must be unique. Existing aggregate rows must use the selected model and retain matching successful `final.csv` files.
+- Root-level GIF movies and metagraphs rebuild from tags in the active `multi.csv`, without recalculating completed rows; rows no longer in the current CSV remain in the aggregate report but do not affect artifacts.
+- The GUI Batch tab edits `multi.csv` in memory and writes it only with **Save Batch**.
+- **Start Batch** reports aggregate completion count and runs rows in the GUI background worker; **Stop Batch** cancels the current row cooperatively and removes its partial result directory. **Clear Results** removes all result artifacts after confirmation.
 
 #### Example multi.csv:
 
@@ -195,6 +208,8 @@ sweep_mut_0.2,0.2,0.11
 Single-run configuration file with all parameters:
 
 *NOTE: use gui to make the config :-)
+
+The GUI's **Load Config** accepts a JSON object and fills omitted known settings from defaults. It updates only unsaved GUI memory; invalid JSON is reported without replacing it. **Save Config** writes canonical `config.json`, while **Save Config As...** exports a copy without changing the canonical file.
 
 ```json
 {
@@ -232,6 +247,7 @@ Single-run configuration file with all parameters:
 | mutation_probability | float | 0.1 | [0, 0.5] | Probability that offspring undergo mutation (vs inheriting average) |
 | mutation_x | float | 1.0 | [0, 10] | Effect size (X): defines mutation interval width |
 | mutation_s | float | 0.0 | [-1, 1] | Asymmetry (S): skews mutation interval toward positive/negative |
+| oldest_death_percent | float | 0.1 | (0, 1] | Oldest population share used for the death-age metric |
 | graph_generation_period | int | 1 | [1, 1000] | Generate yearly `distributionN/survivorshipN/betaoccurrenceN` graphs every N iterations |
 | stop_beta_change_threshold | float | 0.1 | [0.01, 1.0] | Multiplier for β stabilization threshold (change < avg_first_10_years * multiplier) |
 | max_iterations | int | 100000 | [100, 1000000] | Maximum simulation years before termination |
@@ -243,7 +259,10 @@ Single-run configuration file with all parameters:
 ```
 chimpevo/
 ├── main.py           # Simulation orchestration, graphing, CSV export
-├── model.py          # Population dynamics mathematical model
+├── model.py          # Generic population-model lifecycle
+├── model_base.py     # Bundled beta/Gompertz model
+├── model_loader.py   # Trusted dynamic model loading
+├── model_metadata.py # Dynamic model metadata validation
 ├── gui.py            # Tkinter graphical interface
 ├── batch.py          # Batch multi-run launcher
 ├── settings.py       # Parameter defaults and ranges
@@ -262,15 +281,17 @@ chimpevo/
 
 ## Model Architecture
 
-The simulation is split into two modules for clean separation of concerns:
+The v2 simulation separates reusable lifecycle code from model mathematics. `Model` owns the population schema, named field access, generic age behavior, scalar contracts, and binning. `Model_base(Model)` declares the bundled beta model's settings, mortality, reproduction, scalar values, graphs, metagraphs, and default batch sweep. A valid model without `beta` completes normally; beta-specific compatibility outputs are skipped.
 
-### model.py – Pure Mathematical Model
+The detailed beta method reference below applies to `Model_base`, not to every dynamic model.
+
+### model_base.py – Bundled Beta Model
 
 **Purpose**: Encapsulates all population dynamics calculations.
 
-**Class: `Model`**
+**Class: `Model_base`**
 
-Represents a population of animals with age and genetic parameter (beta).
+Represents the bundled population with age and genetic parameter (beta).
 
 **State**:
 - `self.population` – PyTorch tensor `[n_animals, 2]` where each row is `[age, beta]`
@@ -287,19 +308,16 @@ Initializes empty model. Call `initialize_population()` next.
 
 **Methods**:
 
-#### `initialize_population(initial_population, initial_age_max, beta_initial)`
+#### `initialize_population()`
 **Purpose**: Create initial population with random ages and uniform beta.
 
-- **Input**:
-  - `initial_population` (int): How many animals to create
-  - `initial_age_max` (int): Maximum random age (uniform 0 to max)
-  - `beta_initial` (float): Initial beta value for all animals
+- **Input**: None. Values are read from `self.settings`.
   
 - **Output**: None (modifies `self.population`)
 
 - **Example**:
   ```python
-  model.initialize_population(2000, 10, 0.11)
+  model.initialize_population()
   # Creates 2000 animals with ages 0–10, all with beta=0.11
   ```
 

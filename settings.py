@@ -17,7 +17,8 @@ DEFAULT_SETTINGS = {
     "max_iterations": 100000,  # maximum simulation iterations before stopping
     "tag": "default",  # run identifier
     "device": "cuda",  # "cuda" or "cpu"
-    "seed": None,  # optional deterministic seed
+    "model": "model_base",  # dynamic model module name
+    "seed": 0,  # zero selects a random seed; nonzero values are deterministic
 }
 
 # Validation ranges for GUI
@@ -57,6 +58,7 @@ PARAMETER_DESCRIPTIONS = {
     "stop_beta_change_threshold": "Beta stabilization multiplier",
     "max_iterations": "Maximum simulation years",
     "device": "Compute device (CUDA or CPU)",
+    "model": "Dynamic model module",
     "seed": "Optional deterministic random seed",
 }
 
