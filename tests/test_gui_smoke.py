@@ -9,7 +9,7 @@ import gui as gui_module
 from gui import SimulationGUI
 from main import set_logger
 from model import Model
-from model_metadata import validate_model_metadata
+from metadata import validate_model_metadata
 
 
 @pytest.mark.smoke
@@ -79,8 +79,9 @@ def test_gui_model_settings_grid_uses_declared_metadata(gui_app):
     """Create editable model rows from the selected model declarations."""
     max_population_row = gui_app.model_setting_rows["max_population"]
 
+    assert str(gui_app.settings_canvas.cget("yscrollcommand"))
     assert set(gui_app.model_setting_rows) == set(gui_app.model_metadata["settings"])
-    assert max_population_row["configured"].get() == "X"
+    assert max_population_row["supported"] is True
     assert max_population_row["bounds"].get() == "100 <= x <= 100000000"
     assert max_population_row["description"].get() == "Population carrying capacity"
 
@@ -105,6 +106,16 @@ def test_gui_dynamic_graph_tabs_load_declared_annual_frame(gui_app, tmp_path):
     gui_app._display_dynamic_graphs(tmp_path, 0)
 
     assert gui_app.dynamic_graph_images["age_distribution"].size == (10, 10)
+
+
+@pytest.mark.smoke
+def test_gui_detects_only_years_with_generated_graphs(gui_app, tmp_path):
+    """Queue graph refreshes only for years that generated graph files."""
+    assert gui_app._has_year_graphs(tmp_path, 5) is False
+
+    Image.new("RGB", (10, 10), "white").save(tmp_path / "distribution5.png")
+
+    assert gui_app._has_year_graphs(tmp_path, 5) is True
 
 
 @pytest.mark.smoke
@@ -196,7 +207,7 @@ def test_gui_dirty_start_saves_before_launching(gui_app, monkeypatch):
     saves = []
     starts = []
     gui_app.is_config_dirty = True
-    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: True)
     monkeypatch.setattr(gui_app, "_save_config", lambda: saves.append(True))
     monkeypatch.setattr(gui_app, "_launch_simulation", lambda: starts.append(True))
 
@@ -204,6 +215,66 @@ def test_gui_dirty_start_saves_before_launching(gui_app, monkeypatch):
 
     assert saves == [True]
     assert starts == [True]
+
+
+@pytest.mark.smoke
+def test_gui_dirty_start_discards_changes_and_launches_saved_config(gui_app, monkeypatch):
+    """Restore the canonical configuration before launching after choosing No."""
+    starts = []
+    gui_app.is_config_dirty = True
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: False)
+    monkeypatch.setattr(gui_app, "_restore_canonical_config", lambda: True)
+    monkeypatch.setattr(gui_app, "_launch_simulation", lambda: starts.append(True))
+
+    gui_app._start_simulation()
+
+    assert starts == [True]
+
+
+@pytest.mark.smoke
+def test_gui_dirty_start_cancels_without_launching(gui_app, monkeypatch):
+    """Leave unsaved configuration intact when the start dialog is cancelled."""
+    starts = []
+    gui_app.is_config_dirty = True
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: None)
+    monkeypatch.setattr(gui_app, "_launch_simulation", lambda: starts.append(True))
+
+    gui_app._start_simulation()
+
+    assert starts == []
+
+
+@pytest.mark.smoke
+def test_gui_single_start_replaces_existing_tag_results(gui_app, monkeypatch, tmp_path):
+    """Delete only the active tag directory before starting after confirmation."""
+    starts = []
+    result_dir = tmp_path / "result" / gui_app.config["tag"]
+    result_dir.mkdir(parents=True)
+    (result_dir / "result.csv").write_text("old results")
+    monkeypatch.setattr(gui_app, "_ask_tag_result_replacement", lambda tag: True)
+    monkeypatch.setattr(gui_app, "_launch_simulation", lambda: starts.append(True))
+
+    gui_app._start_simulation()
+
+    assert not result_dir.exists()
+    assert starts == [True]
+
+
+@pytest.mark.smoke
+def test_gui_single_start_keeps_existing_tag_results_when_cancelled(gui_app, monkeypatch, tmp_path):
+    """Keep existing tag results and cancel the start when replacement is declined."""
+    starts = []
+    result_dir = tmp_path / "result" / gui_app.config["tag"]
+    result_dir.mkdir(parents=True)
+    result_file = result_dir / "result.csv"
+    result_file.write_text("old results")
+    monkeypatch.setattr(gui_app, "_ask_tag_result_replacement", lambda tag: False)
+    monkeypatch.setattr(gui_app, "_launch_simulation", lambda: starts.append(True))
+
+    gui_app._start_simulation()
+
+    assert result_file.read_text() == "old results"
+    assert starts == []
 
 
 @pytest.mark.smoke
@@ -257,7 +328,8 @@ def test_gui_load_handler_prepares_and_renders_selected_model(gui_app, monkeypat
     assert preparations == ["model_age_only"]
     assert gui_app.config["model"] == "model_age_only"
     assert gui_app.model_var.get() == "model_age_only"
-    assert set(gui_app.model_setting_rows) == {"seed"}
+    assert gui_app.model_setting_rows["seed"]["supported"] is True
+    assert gui_app.model_setting_rows["max_population"]["supported"] is False
     assert [gui_app.graph_notebook.tab(tab, "text") for tab in gui_app.graph_notebook.tabs()] == [
         "Legacy", "Age Distribution",
     ]

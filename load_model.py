@@ -6,7 +6,7 @@ import sys
 from types import ModuleType
 
 from model import Model
-from model_metadata import ModelMetadataError, validate_model_metadata
+from metadata import ModelMetadataError, validate_model_metadata
 
 
 MODEL_NAME_PATTERN = re.compile(r"model_[A-Za-z0-9_]+\Z")

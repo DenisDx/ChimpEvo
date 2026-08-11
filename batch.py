@@ -12,8 +12,8 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
 from main import run_simulation, log
-from model_loader import load_model_class
-from model_metadata import validate_model_metadata
+from load_model import load_model_class
+from metadata import validate_model_metadata
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 
 

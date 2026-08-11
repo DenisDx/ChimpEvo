@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from model import Model
-from model_loader import ModelLoadError, discover_models, load_model_class
+from load_model import ModelLoadError, discover_models, load_model_class
 
 
 def write_model(directory, module_name, source):

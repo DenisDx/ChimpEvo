@@ -2,7 +2,7 @@ import pytest
 
 from model import Model
 from model_base import Model_base
-from model_metadata import ModelMetadataError, validate_model_metadata
+from metadata import ModelMetadataError, validate_model_metadata
 
 
 @pytest.mark.smoke

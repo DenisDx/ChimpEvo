@@ -48,3 +48,4 @@ memory/
 #tmp folder and tmp files
 tmp/
 _*.*
+_*/

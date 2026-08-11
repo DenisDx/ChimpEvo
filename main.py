@@ -18,8 +18,8 @@ import matplotlib.pyplot as plt
 from PIL import Image
 import gc
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
-from model_loader import load_model_class
-from model_metadata import validate_model_metadata
+from load_model import load_model_class
+from metadata import validate_model_metadata
 
 # Global logger callback for GUI integration
 _logger_callback = None

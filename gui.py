@@ -8,6 +8,7 @@ import csv
 import shutil
 import threading
 import time
+import queue
 from pathlib import Path
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -16,8 +17,8 @@ from PIL import Image, ImageTk
 
 from main import PopulationSimulation, set_logger, log
 from batch import run_batch
-from model_loader import ModelLoadError, discover_models, load_model_class
-from model_metadata import validate_model_metadata
+from load_model import ModelLoadError, discover_models, load_model_class
+from metadata import validate_model_metadata
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 
 
@@ -102,6 +103,13 @@ class SimulationGUI:
         self.survivorship_photo = None
         self.betaoccurrence_photo = None
         self._popup_photo = None  # Store popup image to prevent GC
+        self._rescale_jobs = {}
+        self._gui_log_messages = queue.Queue()
+        self._pending_graph_update = None
+        self._pending_final_graph_update = None
+        self._pending_summary_path = None
+        self._pending_simulation_error = None
+        self._simulation_finished = False
         
         # Set logging callback
         set_logger(self._log_to_gui)
@@ -109,6 +117,7 @@ class SimulationGUI:
         # Build UI
         self._create_widgets()
         self._load_config_to_ui()
+        self._schedule_gui_refresh()
         
         log("GUI initialized")
 
@@ -147,8 +156,33 @@ class SimulationGUI:
         self.notebook.pack(fill=tk.BOTH, expand=True)
         
         # Tab 1: Settings
-        settings_frame = ttk.Frame(self.notebook)
-        self.notebook.add(settings_frame, text="Settings")
+        settings_tab = ttk.Frame(self.notebook)
+        self.notebook.add(settings_tab, text="Settings")
+        self.settings_canvas = tk.Canvas(settings_tab, highlightthickness=0)
+        settings_scrollbar = ttk.Scrollbar(
+            settings_tab,
+            orient="vertical",
+            command=self.settings_canvas.yview,
+        )
+        self.settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.settings_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        settings_frame = ttk.Frame(self.settings_canvas)
+        settings_window = self.settings_canvas.create_window(
+            (0, 0),
+            window=settings_frame,
+            anchor=tk.NW,
+        )
+        settings_frame.bind(
+            "<Configure>",
+            lambda event: self.settings_canvas.configure(
+                scrollregion=self.settings_canvas.bbox("all"),
+            ),
+        )
+        self.settings_canvas.bind(
+            "<Configure>",
+            lambda event: self.settings_canvas.itemconfigure(settings_window, width=event.width),
+        )
         self._create_settings_tab(settings_frame)
         
         # Tab 2: Progress & Results
@@ -274,7 +308,10 @@ class SimulationGUI:
         self.distribution_canvas = tk.Canvas(left_graph, bg="white", highlightthickness=0)
         self.distribution_canvas.grid(row=1, column=0, sticky="nsew")
         self.distribution_canvas.create_text(10, 10, anchor=tk.NW, text="No distribution graph yet", fill="gray")
-        self.distribution_canvas.bind("<Configure>", lambda e: self._rescale_distribution_graph())
+        self.distribution_canvas.bind(
+            "<Configure>",
+            lambda event: self._schedule_graph_rescale("distribution"),
+        )
 
         # Middle graph: Survivorship
         middle_graph = ttk.Frame(graphs_row)
@@ -285,7 +322,10 @@ class SimulationGUI:
         self.survivorship_canvas = tk.Canvas(middle_graph, bg="white", highlightthickness=0)
         self.survivorship_canvas.grid(row=1, column=0, sticky="nsew")
         self.survivorship_canvas.create_text(10, 10, anchor=tk.NW, text="No survivorship graph yet", fill="gray")
-        self.survivorship_canvas.bind("<Configure>", lambda e: self._rescale_survivorship_graph())
+        self.survivorship_canvas.bind(
+            "<Configure>",
+            lambda event: self._schedule_graph_rescale("survivorship"),
+        )
 
         # Right graph: Beta Occurrence
         right_graph = ttk.Frame(graphs_row)
@@ -296,7 +336,10 @@ class SimulationGUI:
         self.betaoccurrence_canvas = tk.Canvas(right_graph, bg="white", highlightthickness=0)
         self.betaoccurrence_canvas.grid(row=1, column=0, sticky="nsew")
         self.betaoccurrence_canvas.create_text(10, 10, anchor=tk.NW, text="No beta graph yet", fill="gray")
-        self.betaoccurrence_canvas.bind("<Configure>", lambda e: self._rescale_betaoccurrence_graph())
+        self.betaoccurrence_canvas.bind(
+            "<Configure>",
+            lambda event: self._schedule_graph_rescale("betaoccurrence"),
+        )
         
         # Performance statistics panel
         stats_frame = ttk.LabelFrame(parent, text="Performance Statistics", padding=10)
@@ -680,6 +723,24 @@ class SimulationGUI:
             image=photo,
         )
 
+    def _schedule_graph_rescale(self, graph_name):
+        """Schedule one graph resize after geometry changes settle."""
+        callbacks = {
+            "distribution": self._rescale_distribution_graph,
+            "survivorship": self._rescale_survivorship_graph,
+            "betaoccurrence": self._rescale_betaoccurrence_graph,
+        }
+        previous_job = self._rescale_jobs.pop(graph_name, None)
+        if previous_job is not None:
+            self.root.after_cancel(previous_job)
+
+        def rescale():
+            """Run the latest requested resize for one graph."""
+            self._rescale_jobs.pop(graph_name, None)
+            callbacks[graph_name]()
+
+        self._rescale_jobs[graph_name] = self.root.after(120, rescale)
+
     def _display_dynamic_graphs(self, result_dir, year, final=False):
         """Load declared annual or final graph files into dynamic tabs."""
         for graph in self.model_metadata["graphs"]:
@@ -788,11 +849,58 @@ class SimulationGUI:
             log(f"Error rescaling betaoccurrence: {e}")
 
     def _log_to_gui(self, message):
-        """Callback to display log messages in GUI text widget"""
+        """Queue a log message for the Tk event loop."""
+        self._gui_log_messages.put(message)
+
+    def _schedule_gui_refresh(self):
+        """Schedule the next coalesced GUI refresh."""
+        self.root.after(200, self._refresh_gui)
+
+    def _refresh_gui(self):
+        """Apply queued logs and the latest simulation state in Tk's thread."""
+        latest_graph_update = self._pending_graph_update
+        self._pending_graph_update = None
+        if latest_graph_update is not None:
+            result_dir, year = latest_graph_update
+            self._display_year_graphs(result_dir, year)
+
+        final_graph_update = self._pending_final_graph_update
+        self._pending_final_graph_update = None
+        if final_graph_update is not None:
+            result_dir, year = final_graph_update
+            self._display_dynamic_graphs(result_dir, year, True)
+
+        summary_path = self._pending_summary_path
+        self._pending_summary_path = None
+        if summary_path is not None:
+            self._show_summary_graph_popup(summary_path)
+
         if hasattr(self, "log_text"):
-            self.log_text.insert(tk.END, message + "\n")
-            self.log_text.see(tk.END)
-            self.root.update()
+            has_messages = False
+            while True:
+                try:
+                    message = self._gui_log_messages.get_nowait()
+                except queue.Empty:
+                    break
+                self.log_text.insert(tk.END, message + "\n")
+                has_messages = True
+            if has_messages:
+                self.log_text.see(tk.END)
+
+        if self.is_running:
+            self._update_performance_stats()
+
+        if self._pending_simulation_error is not None:
+            error = self._pending_simulation_error
+            self._pending_simulation_error = None
+            messagebox.showerror("Simulation Error", error)
+
+        if self._simulation_finished:
+            self._simulation_finished = False
+            self.start_btn.config(state=tk.NORMAL)
+            self.stop_btn.config(state=tk.DISABLED)
+
+        self._schedule_gui_refresh()
 
     def _display_year_graphs(self, result_dir, year):
         """Load and display per-year distribution, survivorship, and beta occurrence images
@@ -830,6 +938,22 @@ class SimulationGUI:
             except Exception as e:
                 log(f"Error loading betaoccurrence graph: {e}")
 
+    def _has_year_graphs(self, result_dir, year):
+        """Return whether a year produced any legacy or declared graph file."""
+        directory = Path(result_dir)
+        legacy_files = (
+            f"distribution{year}.png",
+            f"survivorship{year}.png",
+            f"betaoccurrence{year}.png",
+        )
+        if any((directory / filename).exists() for filename in legacy_files):
+            return True
+        return any(
+            graph["annual"]
+            and (directory / f"{graph['filename']}_{year:07d}.png").exists()
+            for graph in self.model_metadata["graphs"]
+        )
+
     def _load_config_to_ui(self):
         """Load config values into UI fields"""
         self.model_var.set(self.config["model"])
@@ -842,7 +966,6 @@ class SimulationGUI:
         for param, var in self.setting_vars.items():
             var.set(str(self.config.get(param, DEFAULT_SETTINGS.get(param, ""))))
         for name, row in self.model_setting_rows.items():
-            row["configured"].set("X" if name in self.config else "")
             row["value"].set(str(self.config.get(name, "")))
 
     def _format_setting_bounds(self, metadata):
@@ -862,31 +985,56 @@ class SimulationGUI:
         for widget in self.model_settings_frame.winfo_children():
             widget.destroy()
         self.model_setting_rows = {}
-        headings = ("Configured", "Name", "Value", "Bounds", "Description")
+        active_settings = self.model_metadata["settings"]
+        excluded_names = set(CORE_SETTING_NAMES) | {"device", "model", "tag"}
+        unsupported_names = sorted(
+            set(self.config) - set(active_settings) - excluded_names,
+        )
+        headings = ("", "Name", "Value", "Bounds", "Description")
         for column, heading in enumerate(headings):
             ttk.Label(
                 self.model_settings_frame,
                 text=heading,
                 font=("TkDefaultFont", 9, "bold"),
             ).grid(row=0, column=column, padx=4, pady=(0, 4), sticky=tk.W)
-        for row_index, (name, metadata) in enumerate(self.model_metadata["settings"].items(), start=1):
-            configured = tk.StringVar(value="X" if name in self.config else "")
-            value = tk.StringVar(value=str(self.config.get(name, metadata["default"])))
-            bounds = tk.StringVar(value=self._format_setting_bounds(metadata))
-            description = tk.StringVar(value=metadata["description"])
+        setting_rows = [
+            (name, metadata, True)
+            for name, metadata in active_settings.items()
+        ] + [
+            (name, None, False)
+            for name in unsupported_names
+        ]
+        for row_index, (name, metadata, supported) in enumerate(setting_rows, start=1):
+            value = tk.StringVar(
+                value=str(self.config.get(name, metadata["default"] if metadata else "")),
+            )
+            bounds = tk.StringVar(value=self._format_setting_bounds(metadata) if metadata else "")
+            description = tk.StringVar(
+                value=metadata["description"] if metadata else "Not supported by the active model",
+            )
             self.model_setting_rows[name] = {
-                "configured": configured,
                 "value": value,
                 "bounds": bounds,
                 "description": description,
+                "supported": supported,
             }
-            ttk.Label(self.model_settings_frame, textvariable=configured, width=10).grid(
+            ttk.Label(
+                self.model_settings_frame,
+                text="\u2713" if supported else "\u2717",
+                foreground="green" if supported else "red",
+                width=2,
+            ).grid(
                 row=row_index, column=0, padx=4, sticky=tk.W,
             )
             ttk.Label(self.model_settings_frame, text=name, width=28).grid(
                 row=row_index, column=1, padx=4, sticky=tk.W,
             )
-            ttk.Entry(self.model_settings_frame, textvariable=value, width=18).grid(
+            ttk.Entry(
+                self.model_settings_frame,
+                textvariable=value,
+                width=18,
+                state=tk.NORMAL if supported else tk.DISABLED,
+            ).grid(
                 row=row_index, column=2, padx=4, sticky=tk.W,
             )
             ttk.Label(self.model_settings_frame, textvariable=bounds, width=25).grid(
@@ -1024,6 +1172,8 @@ class SimulationGUI:
                 return False
 
         for name, row in self.model_setting_rows.items():
+            if not row["supported"]:
+                continue
             metadata = self.model_metadata["settings"][name]
             try:
                 value = self._parse_setting_value(name, row["value"].get(), metadata)
@@ -1044,18 +1194,95 @@ class SimulationGUI:
             self.is_config_dirty = True
         return True
 
+    def _restore_canonical_config(self):
+        """Restore the canonical configuration file into GUI memory and controls."""
+        try:
+            loaded_config = self._load_config()
+            config, metadata, corrected_names = _prepare_model_configuration(
+                loaded_config,
+                loaded_config["model"],
+            )
+        except (ModelLoadError, OSError, ValueError) as error:
+            messagebox.showerror(
+                "Configuration error",
+                f"Could not restore configuration: {error}",
+            )
+            return False
+        self.config = config
+        self.model_metadata = metadata
+        self.is_config_dirty = False
+        self._rebuild_model_settings_grid()
+        self._rebuild_dynamic_graph_tabs()
+        self.batch_column_selector.configure(values=list(metadata["settings"]))
+        self._load_config_to_ui()
+        if corrected_names:
+            messagebox.showwarning(
+                "Model settings corrected",
+                "Corrected settings: " + ", ".join(corrected_names),
+            )
+        return True
+
+    def _ask_tag_result_replacement(self, tag):
+        """Return whether to replace the existing result directory for one tag."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Existing tag results")
+        dialog.transient(self.root)
+        dialog.resizable(False, False)
+        choice = {"replace": False}
+        ttk.Label(
+            dialog,
+            text=(
+                f"The result directory for tag '{tag}' is not empty.\n"
+                "Delete previous calculations and start a new simulation?"
+            ),
+            justify=tk.LEFT,
+            padding=12,
+        ).pack(fill=tk.BOTH, expand=True)
+        buttons = ttk.Frame(dialog, padding=(12, 0, 12, 12))
+        buttons.pack(fill=tk.X)
+
+        def confirm():
+            """Approve result replacement and close the dialog."""
+            choice["replace"] = True
+            dialog.destroy()
+
+        ttk.Button(buttons, text="Yes", command=confirm).pack(side=tk.LEFT)
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.RIGHT)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return choice["replace"]
+
+    def _confirm_tag_result_replacement(self):
+        """Confirm deletion of existing results for the configured single-run tag."""
+        tag = self.config["tag"]
+        result_dir = Path("result") / tag
+        if not result_dir.exists() or not any(result_dir.iterdir()):
+            return True
+        should_replace = self._ask_tag_result_replacement(tag)
+        if should_replace:
+            shutil.rmtree(result_dir)
+        return should_replace
+
     def _start_simulation(self):
-        """Save unsaved changes before launching a simulation."""
+        """Launch after saving, discarding, or retaining the current GUI configuration."""
         if not self._update_config_from_ui():
             return
         if self.is_config_dirty:
-            should_save = messagebox.askyesno(
+            choice = messagebox.askyesnocancel(
                 "Unsaved configuration",
-                "Save configuration before starting the simulation?",
+                "Yes: save and start.\n"
+                "No: discard changes, restore the saved configuration, and start.\n"
+                "Cancel: do not start.",
             )
-            if not should_save:
+            if choice is None:
                 return
-            self._save_config()
+            if choice:
+                self._save_config()
+            elif not self._restore_canonical_config():
+                return
+        if not self._confirm_tag_result_replacement():
+            return
         self._launch_simulation()
 
     def _launch_simulation(self):
@@ -1101,9 +1328,9 @@ class SimulationGUI:
                 has_next = self.simulation.step()
                 if self.simulation.year > 0:
                     latest_year = self.simulation.year - 1
-                    self.root.after(0, self._display_year_graphs, str(self.simulation.output_dir), latest_year)
-                    # Update performance statistics
-                    self.root.after(0, self._update_performance_stats)
+                    output_dir = str(self.simulation.output_dir)
+                    if self._has_year_graphs(output_dir, latest_year):
+                        self._pending_graph_update = (output_dir, latest_year)
                 if not has_next:
                     completed_naturally = True
                     break
@@ -1121,27 +1348,20 @@ class SimulationGUI:
                 # Export all results (CSV + summary graph + GIFs)
                 self.simulation.export_results(successful=completed_naturally)
                 if completed_naturally:
-                    self.root.after(
-                        0,
-                        self._display_dynamic_graphs,
-                        str(output_dir),
-                        last_year,
-                        True,
-                    )
+                    self._pending_final_graph_update = (str(output_dir), last_year)
                 log("Results exported (normal completion)" if completed_naturally else "Results exported (manual stop)")
                 
                 # Show summary graph popup (call from main thread)
                 summary_path = output_dir / "results_summary.png"
                 if summary_path.exists():
-                    self.root.after(0, self._show_summary_graph_popup, str(summary_path))
+                    self._pending_summary_path = str(summary_path)
             
         except Exception as e:
             log(f"Error during simulation: {e}")
-            messagebox.showerror("Simulation Error", str(e))
+            self._pending_simulation_error = str(e)
         finally:
             self.is_running = False
-            self.start_btn.config(state=tk.NORMAL)
-            self.stop_btn.config(state=tk.DISABLED)
+            self._simulation_finished = True
 
     def _update_performance_stats(self):
         """Update performance statistics display from current simulation state"""
