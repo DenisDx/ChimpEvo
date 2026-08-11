@@ -6,6 +6,7 @@ Core iterative year-by-year population dynamics with mutations
 import json
 import os
 import csv
+import random
 import time
 from pathlib import Path
 from datetime import datetime
@@ -38,6 +39,19 @@ def log(*args, **kwargs):
         print(message)
 
 
+def _seed_random_generators(seed):
+    """Seed application random generators when a seed is configured."""
+    if seed is None:
+        return
+
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+
 class PopulationSimulation:
     """Agent-based stochastic model: year-by-year population dynamics"""
 
@@ -49,6 +63,7 @@ class PopulationSimulation:
         """
         self.settings = {**DEFAULT_SETTINGS, **settings}
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.settings["device"] == "cuda" else "cpu")
+        _seed_random_generators(self.settings.get("seed"))
         
         # Validate ranges
         for key, (min_val, max_val) in PARAMETER_RANGES.items():

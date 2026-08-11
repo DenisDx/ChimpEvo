@@ -38,3 +38,13 @@ htmlcov/
 # additional files to ignore
 multi.csv
 config.json
+
+# Other files
+AGENTS.md
+SPEC.md
+.github/
+memory/
+
+#tmp folder and tmp files
+tmp/
+_*.*

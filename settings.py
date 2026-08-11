@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     "max_iterations": 100000,  # maximum simulation iterations before stopping
     "tag": "default",  # run identifier
     "device": "cuda",  # "cuda" or "cpu"
+    "seed": None,  # optional deterministic seed
 }
 
 # Validation ranges for GUI
@@ -56,6 +57,7 @@ PARAMETER_DESCRIPTIONS = {
     "stop_beta_change_threshold": "Beta stabilization multiplier",
     "max_iterations": "Maximum simulation years",
     "device": "Compute device (CUDA or CPU)",
+    "seed": "Optional deterministic random seed",
 }
 
 # Parameter groups for GUI organization
