@@ -7,6 +7,7 @@ import torch
 from model import Model
 from model_base import Model_base
 from model_base_fast import Model_base_fast
+from model_base_fast_fixed_fecundity import Model_base_fecundity
 from settings import DEFAULT_SETTINGS
 
 
@@ -92,6 +93,43 @@ def test_model_base_fast_creates_batched_offspring_up_to_capacity():
     assert model.population.shape == (5, 2)
     torch.testing.assert_close(model.population[-2:, 0], torch.zeros(2))
     assert torch.all((model.population[-2:, 1] >= 0.10) & (model.population[-2:, 1] <= 0.30))
+
+
+@pytest.mark.smoke
+def test_model_base_fecundity_limits_each_parent_to_annual_capacity():
+    """Limit selected parent slots while creating one batch of children."""
+    settings = make_settings()
+    settings.update({
+        "max_population": 20,
+        "mature_age": 2,
+        "fecundity": 1.0,
+        "mutation_probability": 0.0,
+    })
+    model = Model_base_fecundity(settings, torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 0.10],
+        [2.0, 0.20],
+        [2.0, 0.30],
+        [2.0, 0.40],
+    ]))
+
+    births = model.apply_reproduction()
+
+    assert births == 2
+    assert model.last_born == 2
+    assert model.population.shape == (6, 2)
+    torch.testing.assert_close(model.population[-2:, 0], torch.zeros(2))
+
+
+@pytest.mark.smoke
+def test_model_base_fecundity_ignores_fractional_parent_capacity():
+    """Avoid giving an animal a partial indivisible reproductive slot."""
+    settings = make_settings()
+    settings.update({"max_population": 20, "mature_age": 2, "fecundity": 0.5})
+    model = Model_base_fecundity(settings, torch.device("cpu"))
+    model._set_population(torch.tensor([[2.0, 0.10], [2.0, 0.20]]))
+
+    assert model.apply_reproduction() == 0
 
 
 @pytest.mark.smoke

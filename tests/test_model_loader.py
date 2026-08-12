@@ -75,6 +75,11 @@ def test_project_discovery_includes_default_model():
     assert "model_base" in discover_models(project_root)
     assert "model_base_fast" in discover_models(project_root)
     assert load_model_class("model_base_fast", project_root).__name__ == "Model_base_fast"
+    assert "model_base_fast_fixed_fecundity" in discover_models(project_root)
+    assert (
+        load_model_class("model_base_fast_fixed_fecundity", project_root).__name__
+        == "Model_base_fast_fixed_fecundity"
+    )
 
 
 @pytest.mark.smoke

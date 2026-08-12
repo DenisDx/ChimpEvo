@@ -6,6 +6,9 @@ ChimpEvo is an agent-based stochastic model that simulates the year-by-year evol
 
 The generic simulation lifecycle is implemented in `model.py`. The bundled beta/Gompertz mathematics lives in `model_base.py`; additional trusted `model_*.py` files can provide other models.
 
+See [Creating a Custom Model](CREATING_MODELS.md) for the dynamic-model contract, creation steps, and a minimal example.
+See [Model Catalog](MODELS.md) for the available model variants and their behavioral differences.
+
 The application features:
 - **Core simulation engine** (Python + PyTorch) for efficient population dynamics
 - **Graphical interface** (Tkinter) for interactive parameter control and visualization
