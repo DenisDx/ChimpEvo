@@ -12,6 +12,7 @@ __pycache__/
 # Simulation results
 result/
 results/
+data/
 
 # IDE and editor settings
 .vscode/
@@ -38,6 +39,7 @@ htmlcov/
 # additional files to ignore
 multi.csv
 config.json
+default.conf
 
 # Other files
 AGENTS.md

@@ -5,7 +5,7 @@ Allows parameter configuration, execution control, and result visualization
 
 import json
 import csv
-import shutil
+import io
 import threading
 import time
 import queue
@@ -17,9 +17,10 @@ from PIL import Image, ImageTk
 
 from main import PopulationSimulation, set_logger, log
 from batch import run_batch
+from experiment_manager import ExperimentManager, archive_path, atomic_write_text
 from load_model import ModelLoadError, discover_models, load_model_class
 from metadata import validate_model_metadata
-from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
+from settings import DEFAULT_SETTINGS, PARAMETER_DESCRIPTIONS, PARAMETER_RANGES
 
 
 CORE_SETTING_NAMES = (
@@ -27,6 +28,127 @@ CORE_SETTING_NAMES = (
     "graph_generation_period",
     "max_iterations",
 )
+
+BUTTON_TOOLTIPS = {
+    "New Experiment": "Create an experiment from the selected model defaults.",
+    "Delete Experiment": "Delete the active experiment and all of its stored data.",
+    "Load Model": "Load the selected model and its declared settings.",
+    "Load All Model Defaults": "Reset configuration and batch values to the active model defaults.",
+    "Start Simulation": "Start one simulation with the current saved configuration.",
+    "Stop": "Cancel the active single simulation and keep partial results.",
+    "Save Config": "Save the current configuration to the active experiment.",
+    "Save Config As...": "Save the current configuration to another JSON file.",
+    "Load Config ...": "Load configuration values from a JSON file.",
+    "Re-read Config": "Discard unsaved configuration edits and reload config.json.",
+    "Show Progress Window": "Open the non-modal graphs, statistics, and log window.",
+    "Create": "Create the experiment with the entered name and selected model.",
+    "Cancel": "Close this dialog without applying the requested action.",
+    "Stop Simulation": "Cancel the active simulation or batch and keep partial results.",
+    "Finalize Simulation": "Finish the current simulation successfully at the end of this year.",
+    "Add Row": "Append an editable row to the batch table.",
+    "Load Model Defaults": "Replace batch rows with defaults declared by the active model.",
+    "Clear Results": "Archive all current experiment results.",
+    "Add Column": "Add the selected configuration field to every batch row.",
+    "Delete Column": "Delete the selected optional field from every batch row.",
+    "Save Batch": "Save the batch table to multi.csv.",
+    "Re-read Batch": "Discard unsaved batch edits and reload multi.csv.",
+    "Start Batch": "Run all incomplete rows from the saved batch table.",
+    "Run Selected Row": "Run only the selected saved batch row.",
+    "Stop Batch": "Cancel the active batch and keep partial current-row results.",
+    "Yes": "Confirm the requested action.",
+    "Close": "Close this window.",
+}
+
+
+class TooltipManager:
+    """Display delayed contextual hints for registered widgets and buttons."""
+
+    def __init__(self, root, delay_ms=500):
+        """Bind tooltip discovery to all widgets owned by one Tk root."""
+        self.root = root
+        self.delay_ms = delay_ms
+        self._texts = {}
+        self._after_id = None
+        self._tooltip = None
+        self._widget = None
+        root.bind_all("<Enter>", self._on_enter, add="+")
+        root.bind_all("<Leave>", self._on_leave, add="+")
+        root.bind_all("<ButtonPress>", self._on_leave, add="+")
+
+    def register(self, widget, text):
+        """Associate one widget with its concise hint text."""
+        if text:
+            self._texts[str(widget)] = text
+
+    def get_text(self, widget):
+        """Return the explicit or button-text hint for one widget."""
+        explicit_text = self._texts.get(str(widget))
+        if explicit_text:
+            return explicit_text
+        try:
+            if widget.winfo_class() == "TButton":
+                return BUTTON_TOOLTIPS.get(widget.cget("text"))
+        except tk.TclError:
+            return None
+        return None
+
+    def _on_enter(self, event):
+        """Schedule a hint when the entered widget has one."""
+        self._hide()
+        text = self.get_text(event.widget)
+        if not text:
+            return
+        self._widget = event.widget
+        self._after_id = self.root.after(
+            self.delay_ms,
+            lambda: self._show(event.widget, text),
+        )
+
+    def _on_leave(self, event=None):
+        """Cancel pending display and hide the current hint."""
+        self._hide()
+
+    def _show(self, widget, text):
+        """Show one borderless hint near the pointer."""
+        self._after_id = None
+        try:
+            if self._widget is not widget or not widget.winfo_exists():
+                return
+            x = widget.winfo_pointerx() + 14
+            y = widget.winfo_pointery() + 18
+        except tk.TclError:
+            return
+        self._tooltip = tk.Toplevel(self.root)
+        self._tooltip.wm_overrideredirect(True)
+        self._tooltip.wm_geometry(f"+{x}+{y}")
+        tk.Label(
+            self._tooltip,
+            text=text,
+            background="#fffbd6",
+            foreground="#222222",
+            relief=tk.SOLID,
+            borderwidth=1,
+            padx=7,
+            pady=4,
+            justify=tk.LEFT,
+            wraplength=360,
+        ).pack()
+
+    def _hide(self):
+        """Remove pending and visible tooltip state."""
+        if self._after_id is not None:
+            try:
+                self.root.after_cancel(self._after_id)
+            except tk.TclError:
+                pass
+            self._after_id = None
+        if self._tooltip is not None:
+            try:
+                self._tooltip.destroy()
+            except tk.TclError:
+                pass
+            self._tooltip = None
+        self._widget = None
 
 
 def _normalize_model_setting(value, metadata):
@@ -81,17 +203,25 @@ class SimulationGUI:
         self.root = root
         self.root.title("Chimp Evolution Simulator")
         self.root.geometry("1200x900")
-        
-        self.config_file = "config.json"
+        self.is_closing = False
+        self.progress_window = None
+        self.tooltips = TooltipManager(self.root)
+
+        self.experiment_manager = ExperimentManager(Path.cwd())
+        self.experiment_dir = None
+        self._bootstrap_experiment_location()
+        self.config_file = str(self.config_file)
         self.config = self._load_config()
         self.available_models = discover_models()
         self.config, self.model_metadata, _ = _prepare_model_configuration(
             self.config,
             self.config["model"],
         )
-        self.is_config_dirty = False
+        self._set_config_dirty(False)
+        self._loading_ui = False
         self.simulation = None
         self.is_running = False
+        self.finalize_requested = threading.Event()
         self.notebook = None  # Will reference the tab control
         
         # Image storage for rescaling
@@ -118,8 +248,36 @@ class SimulationGUI:
         self._create_widgets()
         self._load_config_to_ui()
         self._schedule_gui_refresh()
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
         
         log("GUI initialized")
+
+    def _bootstrap_experiment_location(self):
+        """Select the current experiment from default.conf or the first available data directory."""
+        experiment_name = self.experiment_manager.get_active_experiment_name()
+        if experiment_name:
+            experiment_dir = self.experiment_manager.get_active_experiment_dir()
+            if experiment_dir is not None and experiment_dir.is_dir():
+                self.experiment_dir = experiment_dir
+                self.config_file = str(experiment_dir / "config.json")
+                return
+
+        data_dir = Path("data")
+        if data_dir.exists():
+            experiment_dirs = sorted(path for path in data_dir.iterdir() if path.is_dir())
+            if experiment_dirs:
+                self.experiment_manager.set_active_experiment(experiment_dirs[0].name)
+                self.experiment_dir = experiment_dirs[0]
+                self.config_file = str(experiment_dirs[0] / "config.json")
+                return
+
+        self.experiment_dir = None
+        self.config_file = "config.json"
+
+    def _result_root(self):
+        """Return the active experiment's result directory."""
+        experiment_dir = getattr(self, "experiment_dir", None)
+        return experiment_dir / "result" if experiment_dir is not None else Path("result")
 
     def _load_config(self, file_path=None):
         """Load one JSON object merged with default settings."""
@@ -139,17 +297,102 @@ class SimulationGUI:
             file_path: optional target path; defaults to current config file
         """
         target_file = Path(file_path or self.config_file)
-        with target_file.open("w") as config_file:
-            json.dump(self.config, config_file, indent=2)
+        atomic_write_text(target_file, json.dumps(self.config, indent=2))
         if target_file == Path(self.config_file):
-            self.is_config_dirty = False
+            self._set_config_dirty(False)
         log(f"Config saved to {target_file}")
+
+    def _set_config_dirty(self, is_dirty):
+        """Set config dirty state and synchronize its top-panel indicator."""
+        self.is_config_dirty = is_dirty
+        if hasattr(self, "config_dirty_var"):
+            self.config_dirty_var.set("Config modified" if is_dirty else "Config saved")
+        if hasattr(self, "config_dirty_label"):
+            self.config_dirty_label.configure(foreground="#0067c0" if is_dirty else "#666666")
+
+    def _set_batch_dirty(self, is_dirty):
+        """Set batch dirty state and synchronize its top-panel indicator."""
+        self.is_batch_dirty = is_dirty
+        if hasattr(self, "batch_dirty_var"):
+            self.batch_dirty_var.set("Batch modified" if is_dirty else "Batch saved")
+        if hasattr(self, "batch_dirty_label"):
+            self.batch_dirty_label.configure(foreground="#0067c0" if is_dirty else "#666666")
+
+    def _mark_config_dirty(self, *args):
+        """Mark configuration memory as modified by an editable control."""
+        if self._loading_ui:
+            return
+        self._set_config_dirty(True)
+
+    def _on_reread_config(self):
+        """Discard GUI config edits and reload the experiment config file."""
+        if self.is_config_dirty and not messagebox.askyesno(
+            "Discard configuration changes",
+            "Discard unsaved configuration changes and re-read config.json?",
+        ):
+            return
+        self._restore_canonical_config()
 
     def _create_widgets(self):
         """Build GUI layout with tabs and controls"""
         # Main container
         main_frame = ttk.Frame(self.root)
         main_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+
+        experiment_frame = ttk.Frame(main_frame)
+        experiment_frame.pack(fill=tk.X, pady=(0, 5))
+        ttk.Label(experiment_frame, text="Experiment").pack(side=tk.LEFT)
+        self.experiment_var = tk.StringVar(
+            value=self.experiment_manager.get_active_experiment_name() or "",
+        )
+        self.experiment_selector = ttk.Combobox(
+            experiment_frame,
+            textvariable=self.experiment_var,
+            values=self.experiment_manager.list_experiments(),
+            state="readonly",
+            width=30,
+        )
+        self.experiment_selector.pack(side=tk.LEFT, padx=5)
+        self.tooltips.register(
+            self.experiment_selector,
+            "Select the active experiment and its configuration, batch, and results.",
+        )
+        self.experiment_selector.bind(
+            "<<ComboboxSelected>>",
+            self._on_experiment_selected,
+        )
+        ttk.Button(
+            experiment_frame,
+            text="New Experiment",
+            command=self._on_new_experiment,
+        ).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            experiment_frame,
+            text="Delete Experiment",
+            command=self._on_delete_experiment,
+        ).pack(side=tk.LEFT, padx=5)
+        self.config_dirty_var = tk.StringVar(value="Config saved")
+        self.config_dirty_label = tk.Label(
+            experiment_frame,
+            textvariable=self.config_dirty_var,
+            foreground="#666666",
+        )
+        self.config_dirty_label.pack(side=tk.RIGHT, padx=8)
+        self.tooltips.register(
+            self.config_dirty_label,
+            "Shows whether the configuration has unsaved changes.",
+        )
+        self.batch_dirty_var = tk.StringVar(value="Batch saved")
+        self.batch_dirty_label = tk.Label(
+            experiment_frame,
+            textvariable=self.batch_dirty_var,
+            foreground="#666666",
+        )
+        self.batch_dirty_label.pack(side=tk.RIGHT, padx=8)
+        self.tooltips.register(
+            self.batch_dirty_label,
+            "Shows whether the batch table has unsaved changes.",
+        )
         
         # Create notebook (tabs)
         self.notebook = ttk.Notebook(main_frame)
@@ -185,29 +428,12 @@ class SimulationGUI:
         )
         self._create_settings_tab(settings_frame)
         
-        # Tab 2: Progress & Results
-        progress_frame = ttk.Frame(self.notebook)
-        self.notebook.add(progress_frame, text="Progress")
-        self._create_progress_tab(progress_frame)
-
         batch_frame = ttk.Frame(self.notebook)
         self.notebook.add(batch_frame, text="Batch")
         self.batch_tab = batch_frame
         self._create_batch_tab(batch_frame)
         
-        # Control buttons at bottom
-        control_frame = ttk.Frame(main_frame)
-        control_frame.pack(fill=tk.X, pady=10)
-        
-        self.start_btn = ttk.Button(control_frame, text="Start Simulation", command=self._start_simulation)
-        self.start_btn.pack(side=tk.LEFT, padx=5)
-        
-        self.stop_btn = ttk.Button(control_frame, text="Stop", command=self._stop_simulation, state=tk.DISABLED)
-        self.stop_btn.pack(side=tk.LEFT, padx=5)
-        
-        ttk.Button(control_frame, text="Save Config", command=self._on_save_config).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Save Config As...", command=self._on_save_config_as).pack(side=tk.LEFT, padx=5)
-        ttk.Button(control_frame, text="Load Config", command=self._on_load_config).pack(side=tk.LEFT, padx=5)
+        self._create_progress_window()
 
     def _create_settings_tab(self, parent):
         """Create settings input fields organized by groups"""
@@ -222,7 +448,12 @@ class SimulationGUI:
             width=30,
         )
         self.model_selector.pack(side=tk.LEFT)
+        self.tooltips.register(
+            self.model_selector,
+            PARAMETER_DESCRIPTIONS["model"],
+        )
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
+        self.model_var.trace_add("write", self._mark_config_dirty)
         ttk.Button(model_frame, text="Load Model", command=self._on_model_selected).pack(side=tk.LEFT, padx=5)
         ttk.Button(
             model_frame,
@@ -239,11 +470,25 @@ class SimulationGUI:
         if not available_cuda:
             selected_device = "cpu"
         self.device_var = tk.StringVar(value=selected_device)
+        self.device_var.trace_add("write", self._mark_config_dirty)
         
-        ttk.Radiobutton(device_frame, text="CUDA (GPU)" if available_cuda else "CUDA (not available)", 
-                       variable=self.device_var, value="cuda", 
-                       state=tk.NORMAL if available_cuda else tk.DISABLED).pack(anchor=tk.W)
-        ttk.Radiobutton(device_frame, text="CPU", variable=self.device_var, value="cpu").pack(anchor=tk.W)
+        cuda_button = ttk.Radiobutton(
+            device_frame,
+            text="CUDA (GPU)" if available_cuda else "CUDA (not available)",
+            variable=self.device_var,
+            value="cuda",
+            state=tk.NORMAL if available_cuda else tk.DISABLED,
+        )
+        cuda_button.pack(anchor=tk.W)
+        cpu_button = ttk.Radiobutton(
+            device_frame,
+            text="CPU",
+            variable=self.device_var,
+            value="cpu",
+        )
+        cpu_button.pack(anchor=tk.W)
+        self.tooltips.register(cuda_button, PARAMETER_DESCRIPTIONS["device"])
+        self.tooltips.register(cpu_button, PARAMETER_DESCRIPTIONS["device"])
         
         # Performance note
         note_text = ("Note: GPU acceleration is effective only for populations of ~1 million or more. "
@@ -254,20 +499,29 @@ class SimulationGUI:
         note_label.pack(anchor=tk.W, pady=(5, 0))
         
         self.setting_vars = {}
+        self.core_setting_widgets = {}
 
         core_frame = ttk.LabelFrame(parent, text="Core Settings", padding=10)
         core_frame.pack(fill=tk.X, padx=5, pady=5)
         for row, name in enumerate(CORE_SETTING_NAMES):
-            ttk.Label(core_frame, text=name, width=28).grid(row=row, column=0, sticky=tk.W)
+            name_label = ttk.Label(core_frame, text=name, width=28)
+            name_label.grid(row=row, column=0, sticky=tk.W)
             value_var = tk.StringVar(value=str(self.config[name]))
             self.setting_vars[name] = value_var
-            ttk.Entry(core_frame, textvariable=value_var, width=15).grid(row=row, column=1, padx=5)
+            value_var.trace_add("write", self._mark_config_dirty)
+            value_entry = ttk.Entry(core_frame, textvariable=value_var, width=15)
+            value_entry.grid(row=row, column=1, padx=5)
             minimum, maximum = PARAMETER_RANGES[name]
-            ttk.Label(
+            bounds_label = ttk.Label(
                 core_frame,
                 text=f"{minimum} <= x <= {maximum}",
                 foreground="gray",
-            ).grid(row=row, column=2, sticky=tk.W)
+            )
+            bounds_label.grid(row=row, column=2, sticky=tk.W)
+            description = PARAMETER_DESCRIPTIONS[name]
+            self.core_setting_widgets[name] = (name_label, value_entry, bounds_label)
+            for widget in self.core_setting_widgets[name]:
+                self.tooltips.register(widget, description)
 
         self.model_settings_frame = ttk.LabelFrame(parent, text="Model Settings", padding=10)
         self.model_settings_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -277,12 +531,296 @@ class SimulationGUI:
         # Tag field
         tag_frame = ttk.Frame(parent)
         tag_frame.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Label(tag_frame, text="Run tag", width=25).pack(side=tk.LEFT)
+        tag_label = ttk.Label(tag_frame, text="Run tag", width=25)
+        tag_label.pack(side=tk.LEFT)
         self.tag_var = tk.StringVar(value=self.config.get("tag", "default"))
-        ttk.Entry(tag_frame, textvariable=self.tag_var, width=15).pack(side=tk.LEFT, padx=5)
+        self.tag_var.trace_add("write", self._mark_config_dirty)
+        tag_entry = ttk.Entry(tag_frame, textvariable=self.tag_var, width=15)
+        tag_entry.pack(side=tk.LEFT, padx=5)
+        self.tooltips.register(tag_label, PARAMETER_DESCRIPTIONS["tag"])
+        self.tooltips.register(tag_entry, PARAMETER_DESCRIPTIONS["tag"])
+        self.start_btn = ttk.Button(tag_frame, text="Start Simulation", command=self._start_simulation)
+        self.start_btn.pack(side=tk.LEFT, padx=(15, 5))
+        self.stop_btn = ttk.Button(tag_frame, text="Stop", command=self._stop_simulation, state=tk.DISABLED)
+        self.stop_btn.pack(side=tk.LEFT, padx=5)
+        ttk.Button(tag_frame, text="Save Config", command=self._on_save_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(tag_frame, text="Save Config As...", command=self._on_save_config_as).pack(side=tk.LEFT, padx=5)
+        ttk.Button(tag_frame, text="Load Config ...", command=self._on_load_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(tag_frame, text="Re-read Config", command=self._on_reread_config).pack(side=tk.LEFT, padx=5)
+        ttk.Button(
+            tag_frame,
+            text="Show Progress Window",
+            command=self._show_progress_window,
+        ).pack(side=tk.LEFT, padx=5)
 
-    def _create_progress_tab(self, parent):
-        """Create progress and statistics display"""
+    def _read_experiment_state(self, experiment_name):
+        """Return validated config and batch paths for one experiment."""
+        experiment_dir = self.experiment_manager.project_root / "data" / experiment_name
+        config_path = experiment_dir / "config.json"
+        if not config_path.is_file():
+            raise ValueError(f"Experiment is missing config.json: {experiment_name}")
+        loaded_config = self._load_config(config_path)
+        config, metadata, _ = _prepare_model_configuration(
+            loaded_config,
+            loaded_config["model"],
+        )
+        batch_path = experiment_dir / "multi.csv"
+        if batch_path.exists():
+            with batch_path.open(newline="", encoding="utf-8") as batch_file:
+                reader = csv.DictReader(batch_file)
+                if not reader.fieldnames or reader.fieldnames[0] != "tag":
+                    raise ValueError("Batch CSV must have tag as its first column")
+                list(reader)
+        return experiment_dir, config_path, batch_path, config, metadata
+
+    def _create_experiment(self, experiment_name, model_name):
+        """Create and activate an experiment from one model's defaults."""
+        model_class = load_model_class(model_name)
+        metadata = validate_model_metadata(model_class)
+        config = {
+            **DEFAULT_SETTINGS,
+            **{name: details["default"] for name, details in metadata["settings"].items()},
+            "model": model_name,
+        }
+        experiment_dir = self.experiment_manager.create_experiment(
+            experiment_name,
+            config,
+            model_class.add_batch(),
+            activate=False,
+        )
+        return experiment_dir
+
+    def _prompt_new_experiment(self):
+        """Show the new-experiment form and return its created directory or None."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("New Experiment")
+        dialog.geometry("560x280")
+        dialog.minsize(520, 260)
+        dialog.transient(self.root)
+        dialog.columnconfigure(1, weight=1)
+
+        explanation = tk.Message(
+            dialog,
+            text=(
+                "Experiments keep independent configurations, batch tables, and results "
+                "and can be switched at any time. Each experiment is stored in "
+                "data/<name>/. The default.conf file contains the name of the active "
+                "experiment."
+            ),
+            width=500,
+            justify=tk.LEFT,
+            foreground="#444444",
+        )
+        explanation.grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky="ew",
+            padx=20,
+            pady=(20, 12),
+        )
+
+        ttk.Label(dialog, text="Experiment name:").grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            padx=(20, 10),
+            pady=10,
+        )
+        experiment_name_var = tk.StringVar()
+        name_entry = ttk.Entry(dialog, textvariable=experiment_name_var)
+        name_entry.grid(row=1, column=1, sticky="ew", padx=(0, 20), pady=10)
+
+        ttk.Label(dialog, text="Model:").grid(
+            row=2,
+            column=0,
+            sticky=tk.W,
+            padx=(20, 10),
+            pady=10,
+        )
+        default_model = DEFAULT_SETTINGS["model"]
+        if default_model not in self.available_models and self.available_models:
+            default_model = self.available_models[0]
+        model_name_var = tk.StringVar(value=default_model)
+        model_selector = ttk.Combobox(
+            dialog,
+            textvariable=model_name_var,
+            values=self.available_models,
+            state="readonly",
+        )
+        model_selector.grid(row=2, column=1, sticky="ew", padx=(0, 20), pady=10)
+
+        result = []
+
+        def cancel():
+            """Close the dialog without creating an experiment."""
+            dialog.destroy()
+
+        def create():
+            """Validate the selected inputs and close after successful creation."""
+            try:
+                experiment_dir = self._create_experiment(
+                    experiment_name_var.get().strip(),
+                    model_name_var.get().strip(),
+                )
+            except (ModelLoadError, OSError, ValueError) as error:
+                messagebox.showerror("Experiment error", str(error), parent=dialog)
+                return
+            result.append(experiment_dir)
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E, padx=20, pady=(18, 16))
+        ttk.Button(buttons, text="Create", command=create).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="Cancel", command=cancel).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.bind("<Return>", lambda event: create())
+        dialog.bind("<Escape>", lambda event: cancel())
+        name_entry.focus_set()
+        self.root.update_idletasks()
+        dialog.update_idletasks()
+        dialog_x = self.root.winfo_rootx() + (
+            self.root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        dialog_y = self.root.winfo_rooty() + (
+            self.root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, dialog_x)}+{max(0, dialog_y)}")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return result[0] if result else None
+
+    def _on_new_experiment(self):
+        """Create a new experiment and switch the GUI to it."""
+        if self.is_running or self.is_batch_running:
+            messagebox.showwarning("Experiment busy", "Stop the active calculation before creating an experiment.")
+            return
+        if not self._confirm_experiment_transition():
+            return
+        try:
+            experiment_dir = self._prompt_new_experiment()
+        except (ModelLoadError, OSError, ValueError) as error:
+            messagebox.showerror("Experiment error", str(error))
+            return
+        if experiment_dir is None:
+            return
+        self.experiment_selector.configure(values=self.experiment_manager.list_experiments())
+        self.experiment_var.set(experiment_dir.name)
+        self._activate_experiment(experiment_dir.name)
+
+    def _on_delete_experiment(self):
+        """Confirm and delete the active experiment, then select or create a replacement."""
+        experiment_name = self.experiment_manager.get_active_experiment_name()
+        if not experiment_name:
+            messagebox.showwarning("Delete Experiment", "No active experiment is selected.")
+            return
+        if self.is_running or self.is_batch_running:
+            messagebox.showwarning("Experiment busy", "Stop the active calculation before deleting an experiment.")
+            return
+        if not self._confirm_experiment_transition():
+            return
+        if not messagebox.askyesno(
+            "Delete Experiment",
+            f"Permanently delete experiment '{experiment_name}' and all of its files?",
+        ):
+            return
+        try:
+            self.experiment_manager.delete_experiment(experiment_name)
+            remaining_experiments = self.experiment_manager.list_experiments()
+            self.experiment_selector.configure(values=remaining_experiments)
+            if remaining_experiments:
+                self.experiment_var.set(remaining_experiments[0])
+                self._activate_experiment(remaining_experiments[0])
+                return
+            experiment_dir = self._prompt_new_experiment()
+            if experiment_dir is None:
+                self.root.destroy()
+                return
+            self.experiment_selector.configure(values=self.experiment_manager.list_experiments())
+            self.experiment_var.set(experiment_dir.name)
+            self._activate_experiment(experiment_dir.name)
+        except (ModelLoadError, OSError, ValueError) as error:
+            messagebox.showerror("Experiment error", str(error))
+
+    def _confirm_experiment_transition(self):
+        """Resolve unsaved config and batch changes before leaving an experiment."""
+        if not self.is_config_dirty and not self.is_batch_dirty:
+            return True
+        choice = messagebox.askyesnocancel(
+            "Unsaved changes",
+            "Configuration or batch data for experiment "
+            f"'{self.experiment_manager.get_active_experiment_name() or self.experiment_var.get()}' was modified. "
+            "Save changes before leaving it?",
+        )
+        if choice is None:
+            return False
+        if not choice:
+            return True
+        try:
+            if not self._update_config_from_ui():
+                return False
+            self._save_config()
+            self._save_batch_csv()
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Experiment error", str(error))
+            return False
+        return True
+
+    def _activate_experiment(self, target_name):
+        """Load one validated experiment into all GUI editors and selectors."""
+        experiment_dir, config_path, batch_path, config, metadata = self._read_experiment_state(
+            target_name,
+        )
+        self.experiment_dir = experiment_dir
+        self.config_file = str(config_path)
+        self.config = config
+        self.model_metadata = metadata
+        self._set_config_dirty(False)
+        self._rebuild_model_settings_grid()
+        self._rebuild_dynamic_graph_tabs()
+        self.batch_column_selector.configure(values=self._batch_column_options(metadata))
+        self._load_config_to_ui()
+        self._load_batch_csv(batch_path)
+        self.experiment_manager.set_active_experiment(target_name)
+        self.batch_status_var.set(f"Ready: {self._aggregate_result_count()} completed")
+
+    def _on_experiment_selected(self, event=None):
+        """Switch experiments after resolving unsaved changes and validating files."""
+        current_name = self.experiment_manager.get_active_experiment_name() or ""
+        target_name = self.experiment_var.get().strip()
+        if not target_name or target_name == current_name:
+            return
+        if self.is_running or self.is_batch_running:
+            self.experiment_var.set(current_name)
+            messagebox.showwarning("Experiment busy", "Stop the active calculation before switching experiments.")
+            return
+        if not self._confirm_experiment_transition():
+            self.experiment_var.set(current_name)
+            return
+        try:
+            experiment_dir, config_path, batch_path, config, metadata = self._read_experiment_state(
+                target_name,
+            )
+        except (ModelLoadError, OSError, ValueError) as error:
+            self.experiment_var.set(current_name)
+            messagebox.showerror("Experiment error", f"Could not switch experiment: {error}")
+            return
+
+        self._activate_experiment(target_name)
+
+    def _create_progress_window(self):
+        """Create the persistent non-modal progress window and hide it initially."""
+        self.progress_window = tk.Toplevel(self.root)
+        self.progress_window.title("Progress")
+        self.progress_window.geometry("1200x900")
+        self.progress_window.protocol("WM_DELETE_WINDOW", self._hide_progress_window)
+        progress_frame = ttk.Frame(self.progress_window, padding=5)
+        progress_frame.pack(fill=tk.BOTH, expand=True)
+        self._create_progress_content(progress_frame)
+        self.progress_window.withdraw()
+
+    def _create_progress_content(self, parent):
+        """Create progress graphs, statistics, controls, and log output."""
         self.graph_notebook = ttk.Notebook(parent)
         self.graph_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
         legacy_graph_frame = ttk.Frame(self.graph_notebook, padding=8)
@@ -341,6 +879,32 @@ class SimulationGUI:
             lambda event: self._schedule_graph_rescale("betaoccurrence"),
         )
         
+        calculation_frame = ttk.LabelFrame(parent, text="Current Calculation", padding=10)
+        calculation_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.progress_tag_var = tk.StringVar(value="-")
+        self.progress_source_var = tk.StringVar(value="No calculation")
+        ttk.Label(calculation_frame, text="Tag:").grid(row=0, column=0, sticky=tk.W)
+        self.progress_tag_label = ttk.Label(calculation_frame, textvariable=self.progress_tag_var)
+        self.progress_tag_label.grid(
+            row=0,
+            column=1,
+            sticky=tk.W,
+            padx=(8, 20),
+        )
+        ttk.Label(calculation_frame, text="Source:").grid(row=0, column=2, sticky=tk.W)
+        self.progress_source_label = ttk.Label(
+            calculation_frame,
+            textvariable=self.progress_source_var,
+            wraplength=700,
+        )
+        self.progress_source_label.grid(row=0, column=3, sticky=tk.W, padx=(8, 0))
+        self.tooltips.register(self.progress_tag_label, "Tag of the active calculation.")
+        self.tooltips.register(
+            self.progress_source_label,
+            "Configuration source and batch values used by the active calculation.",
+        )
+        calculation_frame.columnconfigure(3, weight=1)
+
         # Performance statistics panel
         stats_frame = ttk.LabelFrame(parent, text="Performance Statistics", padding=10)
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
@@ -352,80 +916,155 @@ class SimulationGUI:
         ttk.Label(stats_grid, text="Elapsed Time:").grid(row=0, column=0, sticky=tk.W, padx=(0, 10))
         self.stat_elapsed_time = ttk.Label(stats_grid, text="0.000 s", font=("TkDefaultFont", 9, "bold"))
         self.stat_elapsed_time.grid(row=0, column=1, sticky=tk.W)
+        self.tooltips.register(self.stat_elapsed_time, "Elapsed wall-clock time for the active simulation.")
         
         # Row 2: Average iteration time
         ttk.Label(stats_grid, text="Avg Iteration Time:").grid(row=0, column=2, sticky=tk.W, padx=(20, 10))
         self.stat_avg_iteration = ttk.Label(stats_grid, text="0.000000 s", font=("TkDefaultFont", 9, "bold"))
         self.stat_avg_iteration.grid(row=0, column=3, sticky=tk.W)
+        self.tooltips.register(self.stat_avg_iteration, "Average wall-clock time per completed year.")
         
         # Row 3: Average per-element time
         ttk.Label(stats_grid, text="Avg Per-Element Time:").grid(row=0, column=4, sticky=tk.W, padx=(20, 10))
         self.stat_avg_element = ttk.Label(stats_grid, text="0.000 μs", font=("TkDefaultFont", 9, "bold"))
         self.stat_avg_element.grid(row=0, column=5, sticky=tk.W)
+        self.tooltips.register(self.stat_avg_element, "Average processing time per animal across completed years.")
         
         # Log output
         log_frame = ttk.LabelFrame(parent, text="Log Output", padding=10)
         log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.log_text = tk.Text(log_frame, height=8, width=80, wrap=tk.WORD)
+
+        self.log_autoscroll_var = tk.BooleanVar(value=True)
+        self.log_autoscroll_button = ttk.Checkbutton(
+            log_frame,
+            text="Auto-scroll log",
+            variable=self.log_autoscroll_var,
+        )
+        self.log_autoscroll_button.pack(anchor=tk.W, pady=(0, 5))
+        self.tooltips.register(
+            self.log_autoscroll_button,
+            "Keep the newest log message visible while calculations run.",
+        )
+        log_body = ttk.Frame(log_frame)
+        log_body.pack(fill=tk.BOTH, expand=True)
+        self.log_text = tk.Text(log_body, height=8, width=80, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
-        
-        scrollbar = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_text.yview)
+
+        scrollbar = ttk.Scrollbar(log_body, orient="vertical", command=self.log_text.yview)
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
+        controls = ttk.Frame(parent)
+        controls.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.progress_stop_btn = ttk.Button(
+            controls,
+            text="Stop Simulation",
+            command=self._stop_active_calculation,
+            state=tk.DISABLED,
+        )
+        self.progress_stop_btn.pack(side=tk.RIGHT)
+        self.progress_finalize_btn = ttk.Button(
+            controls,
+            text="Finalize Simulation",
+            command=self._finalize_active_calculation,
+            state=tk.DISABLED,
+        )
+        self.progress_finalize_btn.pack(side=tk.RIGHT, padx=(0, 5))
+
+    def _set_progress_calculation(self, tag, batch_row=None):
+        """Display the current run tag and its default-config or batch-row source."""
+        self.progress_tag_var.set(tag)
+        if batch_row is None:
+            self.progress_source_var.set("Default config")
+            return
+        details = ", ".join(f"{name}={value}" for name, value in batch_row.items())
+        self.progress_source_var.set(f"Batch row: {details}")
+
+    def _show_progress_window(self):
+        """Show and raise the persistent non-modal progress window."""
+        self.progress_window.deiconify()
+        self.progress_window.lift()
+
+    def _hide_progress_window(self):
+        """Hide the progress window without discarding its current state."""
+        self.progress_window.withdraw()
+
     def _create_batch_tab(self, parent):
         """Create the editable in-memory batch CSV table."""
-        self.batch_path = Path("multi.csv")
+        self.batch_path = self.experiment_dir / "multi.csv" if self.experiment_dir is not None else Path("multi.csv")
         self.batch_columns = []
         self.batch_rows = []
-        self.is_batch_dirty = False
+        self._set_batch_dirty(False)
         self.is_batch_running = False
         self.batch_cancel_requested = False
         self.batch_status_var = tk.StringVar(value="Ready")
-        controls = ttk.Frame(parent)
-        controls.pack(fill=tk.X, padx=5, pady=5)
-        ttk.Button(controls, text="Add Row", command=self._add_batch_row).pack(side=tk.LEFT)
-        ttk.Button(controls, text="Save Batch", command=self._on_save_batch).pack(side=tk.LEFT, padx=5)
+        edit_controls = ttk.Frame(parent)
+        edit_controls.pack(fill=tk.X, padx=5, pady=5)
+        ttk.Button(edit_controls, text="Add Row", command=self._add_batch_row).pack(side=tk.LEFT)
         ttk.Button(
-            controls,
+            edit_controls,
             text="Load Model Defaults",
             command=self._load_current_model_batch_defaults,
         ).pack(side=tk.LEFT, padx=5)
         ttk.Button(
-            controls,
+            edit_controls,
             text="Clear Results",
             command=self._clear_result_directory,
         ).pack(side=tk.LEFT, padx=5)
         self.batch_column_var = tk.StringVar()
         self.batch_column_selector = ttk.Combobox(
-            controls,
+            edit_controls,
             textvariable=self.batch_column_var,
-            values=list(self.model_metadata["settings"]),
+            values=self._batch_column_options(),
             state="readonly",
             width=24,
         )
         self.batch_column_selector.pack(side=tk.LEFT, padx=(15, 0))
-        ttk.Button(controls, text="Add Column", command=self._add_batch_column).pack(side=tk.LEFT, padx=5)
+        self.tooltips.register(
+            self.batch_column_selector,
+            "Select a configuration field to add to or remove from the batch table.",
+        )
+        ttk.Button(edit_controls, text="Add Column", command=self._add_batch_column).pack(side=tk.LEFT, padx=5)
+        ttk.Button(edit_controls, text="Delete Column", command=self._delete_batch_column).pack(side=tk.LEFT, padx=5)
+        self.batch_status_var.set(f"Ready: {self._aggregate_result_count()} completed")
+        self.batch_status_label = ttk.Label(parent, textvariable=self.batch_status_var)
+        self.batch_status_label.pack(anchor=tk.W, padx=8)
+        self.tooltips.register(
+            self.batch_status_label,
+            "Shows batch readiness, row progress, cancellation, or failure state.",
+        )
+        self.batch_tree = ttk.Treeview(parent, show="headings")
+        self.batch_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.batch_tree.bind("<Double-1>", self._edit_batch_cell)
+
+        action_controls = ttk.Frame(parent)
+        action_controls.pack(fill=tk.X, padx=5, pady=(0, 5))
+        ttk.Button(action_controls, text="Save Batch", command=self._on_save_batch).pack(side=tk.LEFT)
+        ttk.Button(action_controls, text="Re-read Batch", command=self._on_reread_batch).pack(side=tk.LEFT, padx=5)
         self.batch_start_button = ttk.Button(
-            controls,
+            action_controls,
             text="Start Batch",
             command=self._on_start_batch,
         )
         self.batch_start_button.pack(side=tk.RIGHT)
+        ttk.Button(
+            action_controls,
+            text="Run Selected Row",
+            command=self._on_run_selected_row,
+        ).pack(side=tk.RIGHT, padx=5)
         self.batch_stop_button = ttk.Button(
-            controls,
+            action_controls,
             text="Stop Batch",
             command=self._stop_batch,
             state=tk.DISABLED,
         )
         self.batch_stop_button.pack(side=tk.RIGHT, padx=5)
-        self.batch_status_var.set(f"Ready: {self._aggregate_result_count()} completed")
-        ttk.Label(parent, textvariable=self.batch_status_var).pack(anchor=tk.W, padx=8)
-        self.batch_tree = ttk.Treeview(parent, show="headings")
-        self.batch_tree.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.batch_tree.bind("<Double-1>", self._edit_batch_cell)
         self._load_batch_csv(self.batch_path)
+
+    def _batch_column_options(self, metadata=None):
+        """Return batch-varying model and setting column choices."""
+        active_metadata = metadata or self.model_metadata
+        return ["model", *active_metadata["settings"]]
 
     def _load_batch_csv(self, file_path):
         """Load tag-first CSV rows into the editable batch table."""
@@ -445,7 +1084,7 @@ class SimulationGUI:
                     for row in reader
                 ]
         self.batch_path = path
-        self.is_batch_dirty = False
+        self._set_batch_dirty(False)
         self._render_batch_grid()
 
     def _load_batch_text(self, batch_text):
@@ -456,7 +1095,7 @@ class SimulationGUI:
             raise ValueError("Model batch CSV must have tag as its first column")
         self.batch_columns = columns
         self.batch_rows = [{name: row.get(name, "") for name in columns} for row in rows]
-        self.is_batch_dirty = True
+        self._set_batch_dirty(True)
         self._render_batch_grid()
 
     def _save_batch_csv(self, file_path=None):
@@ -467,12 +1106,13 @@ class SimulationGUI:
         if any(not tag for tag in tags) or len(tags) != len(set(tags)):
             raise ValueError("Batch tags must be non-empty and unique")
         path = Path(file_path or self.batch_path)
-        with path.open("w", newline="", encoding="utf-8") as batch_file:
-            writer = csv.DictWriter(batch_file, fieldnames=self.batch_columns)
-            writer.writeheader()
-            writer.writerows(self.batch_rows)
+        output = io.StringIO()
+        writer = csv.DictWriter(output, fieldnames=self.batch_columns, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(self.batch_rows)
+        atomic_write_text(path, output.getvalue())
         self.batch_path = path
-        self.is_batch_dirty = False
+        self._set_batch_dirty(False)
 
     def _render_batch_grid(self):
         """Render current batch rows and columns into the Treeview."""
@@ -487,7 +1127,7 @@ class SimulationGUI:
     def _add_batch_row(self):
         """Add one blank editable row to the current batch table."""
         self.batch_rows.append({name: "" for name in self.batch_columns})
-        self.is_batch_dirty = True
+        self._set_batch_dirty(True)
         self._render_batch_grid()
 
     def _add_batch_column(self):
@@ -498,7 +1138,22 @@ class SimulationGUI:
         self.batch_columns.append(name)
         for row in self.batch_rows:
             row[name] = ""
-        self.is_batch_dirty = True
+        self._set_batch_dirty(True)
+        self._render_batch_grid()
+
+    def _delete_batch_column(self):
+        """Delete the selected optional batch column while preserving required tag."""
+        name = self.batch_column_var.get()
+        if not name or name not in self.batch_columns:
+            return
+        if name == "tag":
+            messagebox.showwarning("Batch column", "The required tag column cannot be deleted.")
+            return
+        self.batch_columns.remove(name)
+        for row in self.batch_rows:
+            row.pop(name, None)
+        self.batch_column_var.set("")
+        self._set_batch_dirty(True)
         self._render_batch_grid()
 
     def _edit_batch_cell(self, event):
@@ -517,7 +1172,7 @@ class SimulationGUI:
 
         def commit_edit(event=None):
             self.batch_rows[int(item_id)][column_name] = value_var.get()
-            self.is_batch_dirty = True
+            self._set_batch_dirty(True)
             editor.destroy()
             self._render_batch_grid()
 
@@ -533,29 +1188,47 @@ class SimulationGUI:
             return
         messagebox.showinfo("Success", f"Batch saved to {self.batch_path}")
 
+    def _on_reread_batch(self):
+        """Discard in-memory batch edits and reload the experiment CSV."""
+        if self.is_batch_dirty and not messagebox.askyesno(
+            "Discard batch changes",
+            "Discard unsaved batch changes and re-read multi.csv?",
+        ):
+            return
+        try:
+            self._load_batch_csv(self.batch_path)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Batch error", str(error))
+
+    def _confirm_saved_batch_inputs(self):
+        """Save dirty config and batch inputs after explicit confirmation."""
+        if self.is_config_dirty and not messagebox.askyesno(
+            "Unsaved configuration",
+            "Save configuration before starting?",
+        ):
+            return False
+        if self.is_config_dirty:
+            self._save_config()
+        if self.is_batch_dirty and not messagebox.askyesno(
+            "Unsaved batch",
+            "Save batch changes before starting?",
+        ):
+            return False
+        if self.is_batch_dirty:
+            self._save_batch_csv()
+        return True
+
     def _on_start_batch(self):
         """Validate, save, and launch the current batch inside the GUI."""
         if self.is_batch_running or not self._update_config_from_ui():
             return
-        if self.is_config_dirty:
-            if not messagebox.askyesno(
-                "Unsaved configuration",
-                "Save configuration before starting the batch?",
-            ):
+        try:
+            if not self._confirm_saved_batch_inputs():
                 return
-            self._save_config()
-        if self.is_batch_dirty:
-            if not messagebox.askyesno(
-                "Unsaved batch",
-                "Save batch changes before starting the batch?",
-            ):
-                return
-            try:
-                self._save_batch_csv()
-            except (OSError, ValueError) as error:
-                messagebox.showerror("Batch error", str(error))
-                return
-        result_dir = Path("result")
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Batch error", str(error))
+            return
+        result_dir = self._result_root()
         if result_dir.exists() and any(result_dir.iterdir()):
             completed_count = self._aggregate_result_count()
             if not messagebox.askyesno(
@@ -565,9 +1238,34 @@ class SimulationGUI:
                 return
         self._launch_batch()
 
+    def _on_run_selected_row(self):
+        """Run exactly one saved and selected batch row."""
+        selection = self.batch_tree.selection()
+        if len(selection) != 1:
+            messagebox.showwarning("Batch selection", "Select exactly one batch row.")
+            return
+        if not self._update_config_from_ui():
+            return
+        try:
+            if not self._confirm_saved_batch_inputs():
+                return
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Batch error", str(error))
+            return
+        selected_tag = self.batch_rows[int(selection[0])].get("tag", "").strip()
+        if not selected_tag:
+            messagebox.showerror("Batch error", "Selected row must have a tag.")
+            return
+        result_dir = self._result_root() / selected_tag
+        if result_dir.exists() and any(result_dir.iterdir()):
+            if not self._ask_tag_result_replacement(selected_tag):
+                return
+            archive_path(result_dir)
+        self._launch_batch(selected_tag)
+
     def _aggregate_result_count(self):
         """Return the number of persisted aggregate batch result rows."""
-        report_path = Path("result") / "result.csv"
+        report_path = self._result_root() / "result.csv"
         if not report_path.is_file():
             return 0
         try:
@@ -577,26 +1275,33 @@ class SimulationGUI:
             return 0
 
     def _clear_result_directory(self):
-        """Delete all stored simulation and aggregate results after confirmation."""
-        result_dir = Path("result")
+        """Archive all stored simulation and aggregate results after confirmation."""
+        result_dir = self._result_root()
         if not result_dir.exists():
             return
         if not messagebox.askyesno(
             "Clear results",
-            "Delete all simulation results and aggregate batch reports?",
+            "Archive all simulation results and aggregate batch reports?",
         ):
             return
-        shutil.rmtree(result_dir)
+        archive_path(result_dir)
         self.batch_status_var.set("Ready: 0 completed")
 
-    def _launch_batch(self):
+    def _launch_batch(self, selected_tag=None):
         """Start the saved batch in a daemon worker thread."""
         self.is_batch_running = True
         self.batch_cancel_requested = False
+        self.batch_finalize_requested = False
+        self.finalize_requested.clear()
+        self.batch_failed = False
+        self.batch_selected_tag = selected_tag
         self.batch_status_var.set("Starting batch")
         self.batch_start_button.config(state=tk.DISABLED)
         self.batch_stop_button.config(state=tk.NORMAL)
+        self.progress_stop_btn.config(state=tk.NORMAL)
+        self.progress_finalize_btn.config(state=tk.NORMAL)
         self.notebook.select(self.batch_tab)
+        self._show_progress_window()
         worker = threading.Thread(target=self._run_batch_thread, daemon=True)
         worker.start()
 
@@ -604,41 +1309,58 @@ class SimulationGUI:
         """Run batch rows and relay worker progress to the main Tk thread."""
         def report_progress(completed, total, tag, status):
             """Schedule one batch status update on the Tk event loop."""
-            self.root.after(0, self._update_batch_status, completed, total, tag, status)
+            if not self.is_closing:
+                self.root.after(0, self._update_batch_status, completed, total, tag, status)
 
         def report_graph(output_dir, year):
             """Queue one generated batch graph frame for the GUI viewer."""
             self._pending_graph_update = (str(output_dir), year)
-            self.root.after(0, self._show_batch_graphs)
+            if not self.is_closing:
+                self.root.after(0, self._show_batch_graphs)
 
         try:
             run_batch(
                 self.batch_path,
                 self.config_file,
                 should_cancel=lambda: self.batch_cancel_requested,
+                should_finalize=self._consume_finalize_request,
                 progress_callback=report_progress,
                 graph_callback=report_graph,
+                selected_tag=self.batch_selected_tag,
             )
         except Exception as error:
-            self.root.after(0, messagebox.showerror, "Batch error", str(error))
+            self.batch_failed = True
+            if not self.is_closing:
+                self.root.after(0, messagebox.showerror, "Batch error", str(error))
         finally:
-            self.root.after(0, self._finish_batch)
+            if self.is_closing:
+                self.is_batch_running = False
+            else:
+                self.root.after(0, self._finish_batch)
 
     def _update_batch_status(self, completed, total, tag, status):
         """Display one batch runner progress event."""
         self.batch_status_var.set(f"{completed}/{total}: {tag} ({status})")
+        batch_row = next((row for row in self.batch_rows if row.get("tag", "").strip() == tag), None)
+        self._set_progress_calculation(tag, batch_row)
 
     def _show_batch_graphs(self):
-        """Switch to Progress when the active batch run generates a graph frame."""
-        self.notebook.select(1)
+        """Show Progress when the active batch run generates a graph frame."""
+        self._show_progress_window()
 
     def _finish_batch(self):
         """Restore Batch tab controls after the worker exits."""
         self.is_batch_running = False
         self.batch_start_button.config(state=tk.NORMAL)
         self.batch_stop_button.config(state=tk.DISABLED)
+        self.progress_stop_btn.config(state=tk.DISABLED)
+        self.progress_finalize_btn.config(state=tk.DISABLED)
         if self.batch_cancel_requested:
             self.batch_status_var.set("Batch cancelled")
+        elif self.batch_failed:
+            self.batch_status_var.set("Batch failed")
+        elif self.batch_finalize_requested:
+            self.batch_status_var.set("Batch finalized")
         else:
             self.batch_status_var.set("Batch complete")
 
@@ -649,6 +1371,8 @@ class SimulationGUI:
         self.batch_cancel_requested = True
         self.batch_status_var.set("Cancellation requested")
         self.batch_stop_button.config(state=tk.DISABLED)
+        self.progress_stop_btn.config(state=tk.DISABLED)
+        self.progress_finalize_btn.config(state=tk.DISABLED)
 
     def _load_current_model_batch_defaults(self):
         """Replace unsaved batch rows with active model defaults."""
@@ -666,7 +1390,7 @@ class SimulationGUI:
         """Reset active model settings and batch defaults in memory only."""
         for name, metadata in self.model_metadata["settings"].items():
             self.config[name] = metadata["default"]
-        self.is_config_dirty = True
+        self._set_config_dirty(True)
         self._load_config_to_ui()
 
         model_class = load_model_class(self.config["model"])
@@ -864,9 +1588,19 @@ class SimulationGUI:
 
     def _schedule_gui_refresh(self):
         """Schedule the next coalesced GUI refresh."""
-        self.root.after(200, self._refresh_gui)
+        if not self.is_closing:
+            self.root.after(200, self._refresh_gui)
 
     def _refresh_gui(self):
+        """Apply pending GUI state and preserve the periodic refresh after errors."""
+        try:
+            self._apply_gui_refresh()
+        except Exception as error:
+            log(f"Error refreshing GUI: {error}")
+        finally:
+            self._schedule_gui_refresh()
+
+    def _apply_gui_refresh(self):
         """Apply queued logs and the latest simulation state in Tk's thread."""
         latest_graph_update = self._pending_graph_update
         self._pending_graph_update = None
@@ -894,7 +1628,7 @@ class SimulationGUI:
                     break
                 self.log_text.insert(tk.END, message + "\n")
                 has_messages = True
-            if has_messages:
+            if has_messages and self.log_autoscroll_var.get():
                 self.log_text.see(tk.END)
 
         if self.is_running:
@@ -909,8 +1643,8 @@ class SimulationGUI:
             self._simulation_finished = False
             self.start_btn.config(state=tk.NORMAL)
             self.stop_btn.config(state=tk.DISABLED)
-
-        self._schedule_gui_refresh()
+            self.progress_stop_btn.config(state=tk.DISABLED)
+            self.progress_finalize_btn.config(state=tk.DISABLED)
 
     def _display_year_graphs(self, result_dir, year):
         """Load and display per-year distribution, survivorship, and beta occurrence images
@@ -966,17 +1700,21 @@ class SimulationGUI:
 
     def _load_config_to_ui(self):
         """Load config values into UI fields"""
-        self.model_var.set(self.config["model"])
-        requested_device = self.config.get("device", "cuda")
-        # Force CPU selection in UI when CUDA backend is unavailable.
-        if requested_device == "cuda" and not torch.cuda.is_available():
-            requested_device = "cpu"
-        self.device_var.set(requested_device)
-        self.tag_var.set(self.config.get("tag", DEFAULT_SETTINGS["tag"]))
-        for param, var in self.setting_vars.items():
-            var.set(str(self.config.get(param, DEFAULT_SETTINGS.get(param, ""))))
-        for name, row in self.model_setting_rows.items():
-            row["value"].set(str(self.config.get(name, "")))
+        self._loading_ui = True
+        try:
+            self.model_var.set(self.config["model"])
+            requested_device = self.config.get("device", "cuda")
+            # Force CPU selection in UI when CUDA backend is unavailable.
+            if requested_device == "cuda" and not torch.cuda.is_available():
+                requested_device = "cpu"
+            self.device_var.set(requested_device)
+            self.tag_var.set(self.config.get("tag", DEFAULT_SETTINGS["tag"]))
+            for param, var in self.setting_vars.items():
+                var.set(str(self.config.get(param, DEFAULT_SETTINGS.get(param, ""))))
+            for name, row in self.model_setting_rows.items():
+                row["value"].set(str(self.config.get(name, "")))
+        finally:
+            self._loading_ui = False
 
     def _format_setting_bounds(self, metadata):
         """Return a human-readable inclusive range for one setting."""
@@ -1018,6 +1756,7 @@ class SimulationGUI:
             value = tk.StringVar(
                 value=str(self.config.get(name, metadata["default"] if metadata else "")),
             )
+            value.trace_add("write", self._mark_config_dirty)
             bounds = tk.StringVar(value=self._format_setting_bounds(metadata) if metadata else "")
             description = tk.StringVar(
                 value=metadata["description"] if metadata else "Not supported by the active model",
@@ -1028,31 +1767,54 @@ class SimulationGUI:
                 "description": description,
                 "supported": supported,
             }
-            ttk.Label(
+            support_label = ttk.Label(
                 self.model_settings_frame,
                 text="\u2713" if supported else "\u2717",
                 foreground="green" if supported else "red",
                 width=2,
-            ).grid(
+            )
+            support_label.grid(
                 row=row_index, column=0, padx=4, sticky=tk.W,
             )
-            ttk.Label(self.model_settings_frame, text=name, width=28).grid(
+            name_label = ttk.Label(self.model_settings_frame, text=name, width=28)
+            name_label.grid(
                 row=row_index, column=1, padx=4, sticky=tk.W,
             )
-            ttk.Entry(
+            value_entry = ttk.Entry(
                 self.model_settings_frame,
                 textvariable=value,
                 width=18,
                 state=tk.NORMAL if supported else tk.DISABLED,
-            ).grid(
+            )
+            value_entry.grid(
                 row=row_index, column=2, padx=4, sticky=tk.W,
             )
-            ttk.Label(self.model_settings_frame, textvariable=bounds, width=25).grid(
+            hint = description.get()
+            bounds_label = ttk.Label(
+                self.model_settings_frame,
+                textvariable=bounds,
+                width=25,
+            )
+            bounds_label.grid(
                 row=row_index, column=3, padx=4, sticky=tk.W,
             )
-            ttk.Label(self.model_settings_frame, textvariable=description).grid(
+            description_label = ttk.Label(
+                self.model_settings_frame,
+                textvariable=description,
+            )
+            description_label.grid(
                 row=row_index, column=4, padx=4, sticky=tk.W,
             )
+            widgets = (
+                support_label,
+                name_label,
+                value_entry,
+                bounds_label,
+                description_label,
+            )
+            self.model_setting_rows[name]["widgets"] = widgets
+            for widget in widgets:
+                self.tooltips.register(widget, hint)
 
     def _on_save_config(self):
         """Save button handler"""
@@ -1092,10 +1854,10 @@ class SimulationGUI:
                 return
             self.config = config
             self.model_metadata = metadata
-            self.is_config_dirty = True
+            self._set_config_dirty(True)
             self._rebuild_model_settings_grid()
             self._rebuild_dynamic_graph_tabs()
-            self.batch_column_selector.configure(values=list(metadata["settings"]))
+            self.batch_column_selector.configure(values=self._batch_column_options(metadata))
             self._load_config_to_ui()
             if corrected_names:
                 messagebox.showwarning(
@@ -1121,10 +1883,10 @@ class SimulationGUI:
             return
         self.config = config
         self.model_metadata = metadata
-        self.is_config_dirty = True
+        self._set_config_dirty(True)
         self._rebuild_model_settings_grid()
         self._rebuild_dynamic_graph_tabs()
-        self.batch_column_selector.configure(values=list(metadata["settings"]))
+        self.batch_column_selector.configure(values=self._batch_column_options(metadata))
         self._load_config_to_ui()
         if corrected_names:
             messagebox.showwarning(
@@ -1201,7 +1963,7 @@ class SimulationGUI:
             self.config[name] = value
 
         if self.config != previous_config:
-            self.is_config_dirty = True
+            self._set_config_dirty(True)
         return True
 
     def _restore_canonical_config(self):
@@ -1220,10 +1982,10 @@ class SimulationGUI:
             return False
         self.config = config
         self.model_metadata = metadata
-        self.is_config_dirty = False
+        self._set_config_dirty(False)
         self._rebuild_model_settings_grid()
         self._rebuild_dynamic_graph_tabs()
-        self.batch_column_selector.configure(values=list(metadata["settings"]))
+        self.batch_column_selector.configure(values=self._batch_column_options(metadata))
         self._load_config_to_ui()
         if corrected_names:
             messagebox.showwarning(
@@ -1274,12 +2036,12 @@ class SimulationGUI:
     def _confirm_tag_result_replacement(self):
         """Confirm deletion of existing results for the configured single-run tag."""
         tag = self.config["tag"]
-        result_dir = Path("result") / tag
+        result_dir = self._result_root() / tag
         if not result_dir.exists() or not any(result_dir.iterdir()):
             return True
         should_replace = self._ask_tag_result_replacement(tag)
         if should_replace:
-            shutil.rmtree(result_dir)
+            archive_path(result_dir)
         return should_replace
 
     def _start_simulation(self):
@@ -1306,11 +2068,13 @@ class SimulationGUI:
     def _launch_simulation(self):
         """Launch the configured simulation in a background thread."""
         self.is_running = True
+        self.finalize_requested.clear()
         self.start_btn.config(state=tk.DISABLED)
         self.stop_btn.config(state=tk.NORMAL)
-        
-        # Switch to Progress tab
-        self.notebook.select(1)
+        self.progress_stop_btn.config(state=tk.NORMAL)
+        self.progress_finalize_btn.config(state=tk.NORMAL)
+        self._set_progress_calculation(self.config["tag"])
+        self._show_progress_window()
         
         # Clear previous log
         self.log_text.delete(1.0, tk.END)
@@ -1336,14 +2100,19 @@ class SimulationGUI:
         try:
             log(f"Starting simulation with config: {self.config}")
             
-            self.simulation = PopulationSimulation(self.config)
+            self.simulation = PopulationSimulation(
+                self.config,
+                result_root=self._result_root(),
+            )
             # Initialize start time for performance tracking
             self.simulation.start_time = time.perf_counter()
             completed_naturally = False
             
             # Run iterative steps (allows stop button to work)
             while self.is_running:
-                has_next = self.simulation.step()
+                has_next = self.simulation.step(
+                    should_finalize=self._consume_finalize_request,
+                )
                 if self.simulation.year > 0:
                     latest_year = self.simulation.year - 1
                     output_dir = str(self.simulation.output_dir)
@@ -1470,13 +2239,87 @@ class SimulationGUI:
     def _stop_simulation(self):
         """Stop running simulation"""
         self.is_running = False
+        self.stop_btn.config(state=tk.DISABLED)
+        self.progress_stop_btn.config(state=tk.DISABLED)
+        self.progress_finalize_btn.config(state=tk.DISABLED)
         log("Simulation stopped by user")
+
+    def _consume_finalize_request(self):
+        """Consume one thread-safe successful-finalization request."""
+        if not self.finalize_requested.is_set():
+            return False
+        self.finalize_requested.clear()
+        return True
+
+    def _finalize_active_calculation(self):
+        """Request successful completion of the active calculation and batch."""
+        if not self.is_running and not self.is_batch_running:
+            return
+        self.finalize_requested.set()
+        self.batch_finalize_requested = self.is_batch_running
+        self.progress_finalize_btn.config(state=tk.DISABLED)
+        if self.is_batch_running:
+            self.batch_status_var.set("Finalization requested")
+        log("Simulation finalization requested by user")
+
+    def _stop_active_calculation(self):
+        """Stop the active single simulation or request cancellation of the active batch."""
+        if self.is_batch_running:
+            self._stop_batch()
+            return
+        if self.is_running:
+            self._stop_simulation()
+
+    def _on_close(self):
+        """Resolve unsaved state and stop workers before destroying the GUI."""
+        if self.is_running or self.is_batch_running:
+            if not messagebox.askyesno(
+                "Calculation running",
+                "Stop the active calculation and close the application?",
+            ):
+                return
+        if not self._confirm_experiment_transition():
+            return
+        self.is_closing = True
+        self.is_running = False
+        self.batch_cancel_requested = True
+        set_logger(None)
+        self._wait_for_workers_before_close()
+
+    def _wait_for_workers_before_close(self):
+        """Destroy the root after active workers acknowledge cancellation."""
+        if self.is_batch_running:
+            self.root.after(100, self._wait_for_workers_before_close)
+            return
+        self.root.destroy()
 
 
 def main():
     """Launch GUI"""
     root = tk.Tk()
+    manager = ExperimentManager(Path.cwd())
+    missing_selector = manager.get_active_experiment_name() is None
+    existing_experiments = manager.list_experiments()
     gui = SimulationGUI(root)
+    if missing_selector and existing_experiments:
+        messagebox.showwarning(
+            "Experiment selected",
+            f"default.conf was missing. Selected experiment: {existing_experiments[0]}",
+            parent=root,
+        )
+    elif not existing_experiments:
+        try:
+            experiment_dir = gui._prompt_new_experiment()
+        except (ModelLoadError, OSError, ValueError) as error:
+            messagebox.showerror("Experiment error", str(error), parent=root)
+            root.destroy()
+            return
+        if experiment_dir is None:
+            root.destroy()
+            return
+        gui.experiment_selector.configure(values=manager.list_experiments())
+        gui.experiment_var.set(experiment_dir.name)
+        gui._activate_experiment(experiment_dir.name)
     root.mainloop()
 
 

@@ -20,9 +20,16 @@ import gc
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 from load_model import load_model_class
 from metadata import validate_model_metadata
+from experiment_manager import ExperimentNotSelectedError, resolve_experiment_paths, validate_path_component
 
 # Global logger callback for GUI integration
 _logger_callback = None
+
+CORE_RUNTIME_SETTINGS = (
+    "stat_generation_period",
+    "graph_generation_period",
+    "max_iterations",
+)
 
 
 def set_logger(callback):
@@ -53,25 +60,79 @@ def _seed_random_generators(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def validate_runtime_config(settings, model_class=None):
+    """Return model metadata after strict runtime configuration validation."""
+    if not isinstance(settings, dict):
+        raise TypeError("Configuration must be a JSON object")
+    for name in ("model", "tag", "device", *CORE_RUNTIME_SETTINGS):
+        if name not in settings:
+            raise ValueError(f"Missing required setting: {name}")
+    if not isinstance(settings["model"], str) or not settings["model"]:
+        raise ValueError("model must be a non-empty string")
+    if not isinstance(settings["tag"], str) or not settings["tag"]:
+        raise ValueError("tag must be a non-empty string")
+    validate_path_component(settings["tag"], "tag")
+    if settings["tag"] == "_models":
+        raise ValueError("tag is reserved for batch model artifacts: _models")
+    if settings["device"] not in {"cpu", "cuda"}:
+        raise ValueError("device must be cpu or cuda")
+
+    if model_class is None:
+        model_class = load_model_class(settings["model"])
+    model_metadata = validate_model_metadata(model_class)
+    declarations = {
+        **{
+            name: {
+                "type": "int" if isinstance(DEFAULT_SETTINGS[name], int) else "float",
+                "min": PARAMETER_RANGES[name][0],
+                "max": PARAMETER_RANGES[name][1],
+            }
+            for name in CORE_RUNTIME_SETTINGS
+        },
+        **model_metadata["settings"],
+    }
+    for name, declaration in declarations.items():
+        if name not in settings:
+            raise ValueError(f"Missing required setting for {settings['model']}: {name}")
+        value = settings[name]
+        expected_type = declaration["type"]
+        valid_type = {
+            "int": isinstance(value, int) and not isinstance(value, bool),
+            "float": isinstance(value, (int, float)) and not isinstance(value, bool),
+            "str": isinstance(value, str),
+            "bool": isinstance(value, bool),
+        }[expected_type]
+        if not valid_type:
+            raise ValueError(f"Invalid type for {name}: expected {expected_type}")
+        if "min" in declaration and value < declaration["min"]:
+            raise ValueError(f"{name} must be >= {declaration['min']}")
+        if "max" in declaration and value > declaration["max"]:
+            raise ValueError(f"{name} must be <= {declaration['max']}")
+    if settings.get("initial_population", 0) > settings.get("max_population", float("inf")):
+        raise ValueError("initial_population must not exceed max_population")
+    return model_metadata
+
+
 class PopulationSimulation:
     """Agent-based stochastic model: year-by-year population dynamics"""
 
-    def __init__(self, settings):
+    def __init__(self, settings, result_root="result"):
         """Initialize simulation with parameters
         
         Args:
             settings (dict): configuration with keys from DEFAULT_SETTINGS
+            result_root: directory containing tag-specific result folders
         """
-        self.settings = {**DEFAULT_SETTINGS, **settings}
+        self.settings = dict(settings)
+        model_name = self.settings.get("model", "")
+        model_class = load_model_class(model_name)
+        self.model_metadata = validate_runtime_config(self.settings, model_class)
         self.device = torch.device("cuda" if torch.cuda.is_available() and self.settings["device"] == "cuda" else "cpu")
         _seed_random_generators(self.settings.get("seed"))
         
         self._validate_settings()
 
         # Initialize configured dynamic model
-        model_name = self.settings.get("model", "model_base")
-        model_class = load_model_class(model_name)
-        self.model_metadata = validate_model_metadata(model_class)
         self.model = model_class(self.settings, self.device)
         self.has_age_field = "age" in self.model.population_fields
         self.has_beta_field = "beta" in self.model.population_fields
@@ -81,7 +142,7 @@ class PopulationSimulation:
         self.results = []
         self.total_animals_processed = 0
         self.start_time = None
-        self.output_dir = Path("result") / self.settings["tag"]
+        self.output_dir = Path(result_root) / self.settings["tag"]
         self.min_survivorship_exponent = None  # Sticky lower bound exponent (10^x)
         self.stats_collected_count = 0  # Number of times stats have been collected
         # Distribution graph max age (sticky: only expands, never shrinks)
@@ -109,12 +170,9 @@ class PopulationSimulation:
                 self.settings[key] = max(min_val, min(value, max_val))
 
     def _prepare_output_dir(self):
-        """Prepare result folder: remove all old files from tag-specific directory"""
-        # Remove entire directory if it exists
-        if self.output_dir.exists():
-            for file_path in self.output_dir.glob("*"):
-                file_path.unlink(missing_ok=True)
-        # Create fresh directory
+        """Create a new tag result directory without replacing prior data."""
+        if self.output_dir.exists() and any(self.output_dir.iterdir()):
+            raise FileExistsError(f"Result directory is not empty: {self.output_dir}")
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
     def _init_population(self):
@@ -463,22 +521,27 @@ class PopulationSimulation:
             return
 
         log(f"Creating {output_name} from {len(png_files)} PNG files")
-        frames = [Image.open(file_path).convert("P") for file_path in png_files]
+        frames = []
+        for file_path in png_files:
+            with Image.open(file_path) as source_image:
+                frames.append(source_image.convert("P"))
         gif_file = target_dir / output_name
-        frames[0].save(
-            gif_file,
-            save_all=True,
-            append_images=frames[1:],
-            duration=250,
-            loop=0,
-        )
-        for frame in frames:
-            frame.close()
+        try:
+            frames[0].save(
+                gif_file,
+                save_all=True,
+                append_images=frames[1:],
+                duration=250,
+                loop=0,
+            )
+        finally:
+            for frame in frames:
+                frame.close()
         log(f"Saved animation to {gif_file}")
         gc.collect()
 
-    def step(self):
-        """Execute one year iteration: reproduction → aging → mortality"""
+    def step(self, should_finalize=None):
+        """Execute one year and honor an optional successful-finalization request."""
         if self.model.get_population_size() == 0:
             return False
 
@@ -494,6 +557,8 @@ class PopulationSimulation:
         # Step 3: Mortality (stochastic death)
         deaths = self.model.apply_mortality()
         model_stop_reason = self.model.should_stop()
+        if should_finalize is not None and should_finalize():
+            model_stop_reason = model_stop_reason or "finalization requested"
         
         # Determine if we should collect statistics this year
         stat_period = int(self.settings.get("stat_generation_period", 1))
@@ -542,7 +607,7 @@ class PopulationSimulation:
         
         return True
 
-    def run(self, should_cancel=None, graph_callback=None):
+    def run(self, should_cancel=None, should_finalize=None, graph_callback=None):
         """Run until completion and report each generated graph frame."""
         log(f"Starting simulation: {self.settings['tag']}")
         self._log_startup_info()
@@ -555,7 +620,7 @@ class PopulationSimulation:
                 self.was_cancelled = True
                 log("Stop: cancellation requested")
                 break
-            has_next = self.step()
+            has_next = self.step(should_finalize=should_finalize)
             if (
                 graph_callback is not None
                 and self.last_generated_graph_year != reported_graph_year
@@ -735,16 +800,20 @@ class PopulationSimulation:
 def run_simulation(
     config_path="config.json",
     should_cancel=None,
+    should_finalize=None,
     return_completion=False,
     graph_callback=None,
+    result_root="result",
 ):
     """Main entry point for simulation from command line or batch
     
     Args:
         config_path: configuration path or in-memory settings
         should_cancel: optional callback checked between simulation years
+        should_finalize: optional callback requesting successful completion
         return_completion: include successful-completion status in the return value
         graph_callback: optional callback receiving output directory and generated year
+        result_root: directory containing tag-specific result folders
         
     Returns:
         results (list of dicts)
@@ -755,11 +824,12 @@ def run_simulation(
             settings = json.load(f)
     else:
         settings = config_path  # already a dict
-    
+
     # Run simulation
-    sim = PopulationSimulation(settings)
+    sim = PopulationSimulation(settings, result_root=result_root)
     results = sim.run(
         should_cancel=should_cancel,
+        should_finalize=should_finalize,
         graph_callback=graph_callback,
     )
     
@@ -774,11 +844,17 @@ def run_simulation(
 
 if __name__ == "__main__":
     import sys
-    
-    # Optional: tag as first argument
-    config_file = "config.json"
+
+    try:
+        paths = resolve_experiment_paths(Path.cwd())
+    except ExperimentNotSelectedError as error:
+        raise SystemExit(str(error)) from error
+
+    config_file = paths["config_path"]
+    config_source = str(config_file)
     if len(sys.argv) > 1:
-        tag = sys.argv[1]
-        # Could be used to select config variant TODO: implement tag-based config loading
-    
-    run_simulation(config_file)
+        with config_file.open(encoding="utf-8") as source_file:
+            config_source = json.load(source_file)
+        config_source["tag"] = validate_path_component(sys.argv[1], "tag")
+
+    run_simulation(config_source, result_root=paths["result_dir"])

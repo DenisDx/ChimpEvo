@@ -30,6 +30,42 @@ def make_settings(tag="smoke", **overrides):
 
 
 @pytest.mark.smoke
+def test_runtime_config_rejects_missing_model_setting_before_output(tmp_path, monkeypatch):
+    """Reject incomplete model configuration before creating result files."""
+    monkeypatch.chdir(tmp_path)
+    settings = make_settings()
+    settings.pop("beta_initial")
+
+    with pytest.raises(ValueError, match="beta_initial"):
+        PopulationSimulation(settings)
+
+    assert not (tmp_path / "result").exists()
+
+
+@pytest.mark.smoke
+def test_runtime_config_rejects_out_of_range_setting_before_output(tmp_path, monkeypatch):
+    """Reject invalid ranges instead of clamping runtime configuration."""
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="mutation_probability"):
+        PopulationSimulation(make_settings(mutation_probability=2.0))
+
+    assert not (tmp_path / "result").exists()
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("tag", ["../escape", "nested/tag", "_models"])
+def test_runtime_config_rejects_unsafe_result_tags(tmp_path, monkeypatch, tag):
+    """Prevent run tags from escaping or colliding with the result namespace."""
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="tag"):
+        PopulationSimulation(make_settings(tag=tag))
+
+    assert not (tmp_path / "result").exists()
+
+
+@pytest.mark.smoke
 def test_step_collects_current_v1_statistics(tmp_path, monkeypatch):
     """Execute one year and collect the current v1 result contract."""
     monkeypatch.chdir(tmp_path)
@@ -122,6 +158,22 @@ def test_cancelled_run_omits_success_final_csv(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_finalize_request_uses_successful_completion_contract(tmp_path, monkeypatch):
+    """Export final results when an external request finalizes the current year."""
+    monkeypatch.chdir(tmp_path)
+
+    results, completed = run_simulation(
+        make_settings(tag="finalized", stat_generation_period=100),
+        should_finalize=lambda: True,
+        return_completion=True,
+    )
+
+    assert completed is True
+    assert len(results) == 1
+    assert (tmp_path / "result" / "finalized" / "final.csv").exists()
+
+
+@pytest.mark.smoke
 def test_yearly_statistics_use_model_scalar_values(tmp_path, monkeypatch):
     """Build legacy result columns from the model scalar namespace."""
     monkeypatch.chdir(tmp_path)
@@ -210,7 +262,7 @@ def test_age_only_external_model_completes_without_beta_outputs(tmp_path, monkey
     monkeypatch.setattr(main_module, "load_model_class", Mock(return_value=Model_age_only))
 
     _, completed = run_simulation(
-        make_settings(model="model_age_only", tag="age_only", max_iterations=1),
+        make_settings(model="model_age_only", tag="age_only", initial_population=1),
         return_completion=True,
     )
 

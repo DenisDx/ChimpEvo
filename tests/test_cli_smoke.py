@@ -33,7 +33,10 @@ def make_cli_config():
 @pytest.mark.smoke
 def test_main_cli_completes_with_project_interpreter(tmp_path):
     """Run the CLI with the pytest virtual-environment interpreter."""
-    (tmp_path / "config.json").write_text(
+    experiment_dir = tmp_path / "data" / "cli_experiment"
+    experiment_dir.mkdir(parents=True)
+    (tmp_path / "default.conf").write_text("cli_experiment", encoding="utf-8")
+    (experiment_dir / "config.json").write_text(
         json.dumps(make_cli_config()),
         encoding="utf-8",
     )
@@ -49,6 +52,8 @@ def test_main_cli_completes_with_project_interpreter(tmp_path):
 
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert "Simulation complete" in completed.stdout
-    assert (tmp_path / "result" / "cli_smoke" / "result.csv").is_file()
-    assert (tmp_path / "result" / "cli_smoke" / "final.csv").is_file()
-    assert (tmp_path / "result" / "cli_smoke" / "results_summary.png").is_file()
+    result_dir = experiment_dir / "result" / "cli_smoke"
+    assert (result_dir / "result.csv").is_file()
+    assert (result_dir / "final.csv").is_file()
+    assert (result_dir / "results_summary.png").is_file()
+    assert not (tmp_path / "result").exists()

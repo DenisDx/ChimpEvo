@@ -140,18 +140,22 @@ python gui.py
 ```
 
 Opens a window where you can:
+- Create, switch, and confirm deletion of experiments stored under `data/<experiment>/`
 - Edit all simulation parameters with real-time validation (organized in Settings tab)
 - Select CPU or CUDA accelerated computation
-- Start/stop simulations (automatically switches to Progress tab on start)
+- Start/stop simulations (automatically opens the non-modal Progress window on start)
 - View live statistics, logs, and generated graphs
 - Save/load configurations from JSON files
 
-The GUI features three tabs:
+The main GUI features two tabs:
 1. **Settings**: Parameter input fields, device selection, save/load config
-2. **Progress**: Real-time logs, performance statistics, legacy graphs, and model-declared graph tabs
-3. **Batch**: Editable batch CSV, aggregate progress, Start/Stop controls, and result cleanup
+2. **Batch**: Editable batch CSV, aggregate progress, Start/Stop controls, and result cleanup
 
-The Settings tab can load a selected model, or load all active model defaults into memory. Defaults and batch rows require explicit Save actions before they replace `config.json` or `multi.csv`.
+The separate non-modal **Progress** window contains current-run tag/source details, real-time logs, performance statistics, legacy graphs, model-declared graph tabs, and calculation controls. **Stop Simulation** cancels and keeps partial output. **Finalize Simulation** completes the current simulation successfully at the end of its current year and writes final outputs. During batch execution, finalizing completes the current row and then stops the batch before the next row. Batch runs show the complete active CSV row; single runs show `Default config`. Use **Show Progress Window** to open it at any time. **Auto-scroll log** controls whether new messages move the log to its end. Closing Progress hides it without interrupting a calculation or discarding its current display.
+
+The Settings tab contains the simulation and configuration actions and can load a selected model or all active model defaults into memory. Hover hints briefly explain buttons, configuration fields using their declared descriptions, and state indicators. Separate top-panel indicators show config and batch dirty state in blue. Switching experiments offers save, discard, or cancel when either editor has unsaved changes and identifies the experiment being left.
+
+On first launch, the GUI opens a New Experiment form with an experiment-name field and a model selector populated from the discovered models. The selected model supplies its default settings and optional default batch CSV. `default.conf` stores only the active experiment name. Cancelling initial creation closes the GUI without creating project data.
 
 ### 2. Single Simulation (Console)
 
@@ -159,7 +163,7 @@ The Settings tab can load a selected model, or load all active model defaults in
 python main.py
 ```
 
-Runs one simulation using parameters from `config.json`. Outputs results to `result/[tag]/`:
+Runs one simulation using `data/<experiment>/config.json`, where `<experiment>` is selected by `default.conf`. Missing or invalid experiment selection is an error. Outputs results to `data/<experiment>/result/[tag]/`:
 - `result.csv` — model-declared annual statistics
 - `final.csv` — core run metadata and model-declared final values after successful completion
 - `age_distribution_0000005.png` — dynamic annual graph frame with a seven-digit year suffix
@@ -181,19 +185,22 @@ Runs one simulation using parameters from `config.json`. Outputs results to `res
 ### 3. Batch Processing (Parameter Sweeps)
 
 ```bash
-python batch.py [multi.csv] [config.json]
+python batch.py
 ```
 
 Executes multiple simulations with parameter variants:
-- **multi.csv** contains columns matching parameter names and a `tag` column
-- Each row is a separate run, inheriting unchanged parameters from base config.json
-- Results are saved to `result/[tag_from_csv]/`
-- Successful rows append their final values to authoritative `result/result.csv`; a later batch run resumes by skipping compatible completed tags.
-- Each aggregate row stores the original batch values, all resolved model settings, and every field from that run's `final.csv`.
-- Batch tags and parameter rows must be unique. Existing aggregate rows must use the selected model and retain matching successful `final.csv` files.
-- Root-level GIF movies and metagraphs rebuild from tags in the active `multi.csv`, without recalculating completed rows; rows no longer in the current CSV remain in the aggregate report but do not affect artifacts.
+- The active experiment supplies `config.json`, `multi.csv`, and `result/`.
+- **multi.csv** contains a required first `tag` column and may override `model` or other settings per row.
+- Each row is resolved and validated before any calculation starts. Missing, incorrectly typed, or out-of-range required settings are errors.
+- Results are saved to `data/<experiment>/result/[tag_from_csv]/`.
+- Successful rows append their final values to authoritative `data/<experiment>/result/result.csv`; a later batch run resumes only when the tag's full resolved configuration signature is unchanged.
+- Each aggregate row stores original CSV cells as `input_*`, all resolved settings, and every field from that run's `final.csv`.
+- Batch tags and parameter rows must be unique. Existing aggregate rows must retain matching successful `final.csv` files and the same resolved configuration for each tag.
+- GIF movies and metagraphs rebuild from active CSV tags without recalculating completed rows. Mixed-model artifacts are separated under `result/_models/<model>/`.
 - The GUI Batch tab edits `multi.csv` in memory and writes it only with **Save Batch**.
-- **Start Batch** reports aggregate completion count and runs rows in the GUI background worker; **Stop Batch** cancels the current row cooperatively and removes its partial result directory. **Clear Results** removes all result artifacts after confirmation.
+- Optional batch columns can include `model`; **Delete Column** removes a selected optional column but never the required `tag` column.
+- **Start Batch** runs all rows; **Run Selected Row** runs one saved row after full CSV validation. Both require saved config and batch state.
+- **Stop Batch** cancels cooperatively and archives partial output. Progress **Finalize Simulation** completes and records the current row, then stops before the next row. **Clear Results** archives the complete result directory as `result_<timestamp>.bak` after confirmation.
 
 #### Example multi.csv:
 
@@ -208,11 +215,11 @@ sweep_mut_0.2,0.2,0.11
 
 ### config.json
 
-Single-run configuration file with all parameters:
+Experiment-local single-run configuration file with all required parameters:
 
 *NOTE: use gui to make the config :-)
 
-The GUI's **Load Config** accepts a JSON object and fills omitted known settings from defaults. It updates only unsaved GUI memory; invalid JSON is reported without replacing it. **Save Config** writes canonical `config.json`, while **Save Config As...** exports a copy without changing the canonical file.
+The GUI's **Load Config** accepts a JSON object and prepares it in unsaved GUI memory. **Save Config** writes the active experiment's canonical `config.json`, **Re-read Config** discards memory changes, and **Save Config As...** exports a copy. CLI and batch execution validate the persisted configuration strictly instead of adding or clamping required model values.
 
 ```json
 {

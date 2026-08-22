@@ -5,20 +5,24 @@ Loads parameter variations from multi.csv and runs sequentially
 
 import csv
 import json
-import shutil
 from pathlib import Path
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from PIL import Image
-from main import run_simulation, log
+from main import run_simulation, log, validate_runtime_config
+from experiment_manager import ExperimentNotSelectedError, archive_path, resolve_experiment_paths
 from load_model import load_model_class
 from metadata import validate_model_metadata
-from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
+from settings import DEFAULT_SETTINGS
 
 
 class BatchValidationError(ValueError):
     """Report invalid batch rows or incompatible persisted batch results."""
+
+
+class BatchExecutionError(RuntimeError):
+    """Report one or more batch rows that failed during execution."""
 
 
 def _load_variants(csv_path, base_config):
@@ -77,10 +81,6 @@ def _resolve_row_config(base_config, variant, model_settings):
                 value = _parse_value(value_text, metadata["type"])
             except ValueError as error:
                 raise BatchValidationError(f"Invalid {name}={value_text}: {error}") from error
-            if "min" in metadata:
-                value = max(value, metadata["min"])
-            if "max" in metadata:
-                value = min(value, metadata["max"])
             config[name] = value
             continue
         if name not in DEFAULT_SETTINGS:
@@ -91,16 +91,13 @@ def _resolve_row_config(base_config, variant, model_settings):
             value = _parse_value(value_text, type_name)
         except ValueError as error:
             raise BatchValidationError(f"Invalid {name}={value_text}: {error}") from error
-        if name in PARAMETER_RANGES:
-            minimum, maximum = PARAMETER_RANGES[name]
-            value = max(minimum, min(value, maximum))
         config[name] = value
     return config
 
 
-def _read_final_row(tag, model_name):
+def _read_final_row(tag, model_name, result_dir):
     """Read and validate one completed row's successful final CSV."""
-    final_path = Path("result") / tag / "final.csv"
+    final_path = result_dir / tag / "final.csv"
     if not final_path.is_file():
         raise BatchValidationError(f"Completed tag {tag} is missing final.csv")
     with final_path.open(newline="", encoding="utf-8") as final_file:
@@ -110,8 +107,8 @@ def _read_final_row(tag, model_name):
     return rows[0]
 
 
-def _load_aggregate_rows(report_path, model_name, active_tags):
-    """Read and validate prior aggregate rows for one selected model."""
+def _load_aggregate_rows(report_path, expected_signatures, active_tags, result_dir):
+    """Read and validate prior aggregate rows against current tag models."""
     if not report_path.exists():
         return [], []
     with report_path.open(newline="", encoding="utf-8") as report_file:
@@ -124,9 +121,10 @@ def _load_aggregate_rows(report_path, model_name, active_tags):
     if any(not tag for tag in tags) or len(tags) != len(set(tags)):
         raise BatchValidationError("Aggregate result.csv contains duplicate or empty tags")
     for row in rows:
-        if row["model"] != model_name:
-            raise BatchValidationError("Aggregate result.csv belongs to a different model")
-        _read_final_row(row["tag"], model_name)
+        _read_final_row(row["tag"], row["model"], result_dir)
+        expected_signature = expected_signatures.get(row["tag"])
+        if row["tag"] in active_tags and row.get("config_signature") != expected_signature:
+            raise BatchValidationError(f"Completed tag {row['tag']} has a different resolved configuration")
     return fieldnames, rows
 
 
@@ -165,7 +163,7 @@ def _save_gif(image_paths, output_path):
     )
 
 
-def _render_final_graph_movies(metadata, rows, result_dir):
+def _render_final_graph_movies(metadata, rows, result_dir, output_dir):
     """Collect declared per-tag final graph PNGs into root-level GIF movies."""
     for graph in metadata["graphs"]:
         if not graph["final"]:
@@ -175,16 +173,16 @@ def _render_final_graph_movies(metadata, rows, result_dir):
             for row in rows
             if (result_dir / row["tag"] / f"{graph['filename']}.png").is_file()
         ]
-        _save_gif(image_paths, result_dir / f"{graph['filename']}.gif")
+        _save_gif(image_paths, output_dir / f"{graph['filename']}.gif")
 
 
-def _render_metagraphs(metadata, rows, result_dir):
+def _render_metagraphs(metadata, rows, output_dir):
     """Render cumulative aggregate plots and optional GIFs for declared metagraphs."""
     for graph in metadata["metagraphs"]:
         filename = graph["filename"]
-        for stale_frame in result_dir.glob(f"{filename}_*.png"):
+        for stale_frame in output_dir.glob(f"{filename}_*.png"):
             stale_frame.unlink()
-        gif_path = result_dir / f"{filename}.gif"
+        gif_path = output_dir / f"{filename}.gif"
         gif_path.unlink(missing_ok=True)
 
         xvalue = graph.get("xvalue")
@@ -217,7 +215,7 @@ def _render_metagraphs(metadata, rows, result_dir):
             axis.grid(True, alpha=0.3)
             if len(graph["values"]) > 1:
                 axis.legend()
-            frame_path = result_dir / f"{filename}_{index:07d}.png"
+            frame_path = output_dir / f"{filename}_{index:07d}.png"
             figure.tight_layout()
             figure.savefig(frame_path, dpi=100, bbox_inches="tight")
             plt.close(figure)
@@ -226,20 +224,38 @@ def _render_metagraphs(metadata, rows, result_dir):
             _save_gif(frame_paths, gif_path)
 
 
-def _rebuild_batch_artifacts(metadata, rows):
+def _rebuild_batch_artifacts(metadata, rows, result_dir, output_dir=None):
     """Rebuild root-level batch movies and metagraphs from aggregate rows."""
-    result_dir = Path("result")
     result_dir.mkdir(parents=True, exist_ok=True)
-    _render_final_graph_movies(metadata, rows, result_dir)
-    _render_metagraphs(metadata, rows, result_dir)
+    output_dir = Path(output_dir or result_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _render_final_graph_movies(metadata, rows, result_dir, output_dir)
+    _render_metagraphs(metadata, rows, output_dir)
+
+
+def _rebuild_all_model_artifacts(metadata_by_model, rows, result_dir):
+    """Rebuild batch artifacts separately for each model in a mixed batch."""
+    mixed_models = len(metadata_by_model) > 1
+    for model_name, metadata in metadata_by_model.items():
+        model_rows = [row for row in rows if row.get("model") == model_name]
+        output_dir = result_dir / "_models" / model_name if mixed_models else result_dir
+        _rebuild_batch_artifacts(metadata, model_rows, result_dir, output_dir)
+
+
+def _config_signature(config):
+    """Return a stable serialized identity for one fully resolved configuration."""
+    return json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
 def run_batch(
-    csv_path="multi.csv",
-    config_path="config.json",
+    csv_path=None,
+    config_path=None,
     should_cancel=None,
+    should_finalize=None,
     progress_callback=None,
     graph_callback=None,
+    result_dir=None,
+    selected_tag=None,
 ):
     """Run multiple simulations with parameter variants
     
@@ -247,109 +263,184 @@ def run_batch(
         csv_path: multi.csv file with parameter variants (tag in first column)
         config_path: base config.json to merge with variants
         should_cancel: optional callback checked before and during each row
+        should_finalize: optional callback that finalizes the current row and batch
         progress_callback: callback(completed, total, tag, status) for row updates
+        result_dir: directory containing aggregate and tag-specific results
+        selected_tag: optional single validated batch tag to execute
         
     Returns:
         list of result directories
     """
+    if csv_path is None or config_path is None:
+        paths = resolve_experiment_paths(Path.cwd())
+        csv_path = paths["batch_path"] if csv_path is None else csv_path
+        config_path = paths["config_path"] if config_path is None else config_path
+        result_dir = paths["result_dir"] if result_dir is None else result_dir
     config_path = Path(config_path)
+    result_dir = Path(result_dir) if result_dir is not None else config_path.parent / "result"
     if config_path.exists():
         with config_path.open(encoding="utf-8") as config_file:
             persisted_config = json.load(config_file)
     else:
         persisted_config = {}
-    model_name = persisted_config.get("model", DEFAULT_SETTINGS["model"])
-    model_metadata = validate_model_metadata(load_model_class(model_name))
-    base_config = {
-        **DEFAULT_SETTINGS,
-        **{name: metadata["default"] for name, metadata in model_metadata["settings"].items()},
-        **persisted_config,
-    }
+    base_config = dict(persisted_config)
     fieldnames, variants = _load_variants(csv_path, base_config)
+    resolved_rows = []
+    metadata_by_model = {}
+    for variant in variants:
+        model_name = variant.get("model") or base_config.get("model")
+        if not model_name:
+            raise BatchValidationError(f"Batch tag {variant.get('tag', '')} has no model")
+        model_metadata = metadata_by_model.setdefault(
+            model_name,
+            validate_model_metadata(load_model_class(model_name)),
+        )
+        config = _resolve_row_config(base_config, variant, model_metadata["settings"])
+        validate_runtime_config(config)
+        resolved_rows.append((variant, config, model_metadata))
+    execution_variants = variants
+    if selected_tag is not None:
+        execution_variants = [variant for variant in variants if variant["tag"] == selected_tag]
+        if not execution_variants:
+            raise BatchValidationError(f"Unknown selected batch tag: {selected_tag}")
     active_tags = {row["tag"] for row in variants}
-    report_path = Path("result") / "result.csv"
-    existing_fields, aggregate_rows = _load_aggregate_rows(report_path, model_name, active_tags)
-    final_fields = [
-        "year",
-        "duration_seconds",
-        *[name for name, metadata in model_metadata["values"].items() if metadata["final"]],
-    ]
-    model_setting_names = list(model_metadata["settings"])
+    expected_signatures = {
+        config["tag"]: _config_signature(config)
+        for _, config, _ in resolved_rows
+    }
+    report_path = result_dir / "result.csv"
+    existing_fields, aggregate_rows = _load_aggregate_rows(
+        report_path,
+        expected_signatures,
+        active_tags,
+        result_dir,
+    )
+    final_fields = ["year", "duration_seconds"]
+    for metadata in metadata_by_model.values():
+        final_fields.extend(name for name, details in metadata["values"].items() if details["final"])
+    resolved_setting_names = list(dict.fromkeys(
+        name for _, config, _ in resolved_rows for name in config
+    ))
     aggregate_fields = list(dict.fromkeys([
         *existing_fields,
         "model",
+        "config_signature",
         *fieldnames,
-        *model_setting_names,
+        *[f"input_{name}" for name in fieldnames],
+        *resolved_setting_names,
         *final_fields,
     ]))
     completed_tags = {row["tag"] for row in aggregate_rows}
     results_dirs = []
     completed_count = 0
-    total_count = len(variants)
+    total_count = len(execution_variants)
     should_cancel = should_cancel or (lambda: False)
+    should_finalize = should_finalize or (lambda: False)
     progress_callback = progress_callback or (lambda completed, total, tag, status: None)
     graph_callback = graph_callback or (lambda output_dir, year: None)
+    failed_rows = []
     
-    for i, variant in enumerate(variants):
+    resolved_by_tag = {variant["tag"]: (config, metadata) for variant, config, metadata in resolved_rows}
+    for i, variant in enumerate(execution_variants):
         tag = variant["tag"]
         if should_cancel():
             progress_callback(completed_count, total_count, tag, "cancelled")
             break
         if tag in completed_tags:
-            results_dirs.append(f"result/{tag}")
+            results_dirs.append((result_dir / tag).as_posix())
             completed_count += 1
             progress_callback(completed_count, total_count, tag, "skipped")
             continue
         progress_callback(completed_count, total_count, tag, "started")
         log(f"\n{'='*60}")
-        log(f"Batch run {i+1}/{len(variants)}")
+        log(f"Batch run {i+1}/{len(execution_variants)}")
         log(f"{'='*60}")
         
-        config = _resolve_row_config(base_config, variant, model_metadata["settings"])
+        config, model_metadata = resolved_by_tag[tag]
+        model_name = config["model"]
+        tag_result_dir = result_dir / config.get("tag", "default")
+        if tag_result_dir.exists():
+            archive_path(tag_result_dir)
         
         log(f"Running with tag '{tag or 'default'}'")
         log(f"Config: {json.dumps(config, indent=2)[:200]}...")
         
         # Run simulation
         try:
+            row_finalized = False
+
+            def finalize_current_row():
+                """Record and return a successful-finalization request for this row."""
+                nonlocal row_finalized
+                row_finalized = should_finalize()
+                return row_finalized
+
             _, completed = run_simulation(
                 config,
                 should_cancel=should_cancel,
+                should_finalize=finalize_current_row,
                 return_completion=True,
                 graph_callback=graph_callback,
+                result_root=result_dir,
             )
             if not completed:
-                partial_output_dir = Path("result") / config.get("tag", "default")
-                shutil.rmtree(partial_output_dir, ignore_errors=True)
+                partial_output_dir = result_dir / config.get("tag", "default")
+                try:
+                    archive_path(partial_output_dir)
+                except OSError as archive_error:
+                    log(
+                        f"Could not archive cancelled output {partial_output_dir}: "
+                        f"{archive_error}. It will be archived before the next run."
+                    )
                 progress_callback(completed_count, total_count, config.get("tag", "default"), "cancelled")
                 break
-            results_dirs.append(f"result/{config.get('tag', 'default')}")
-            final_row = _read_final_row(config["tag"], model_name)
-            aggregate_rows.append({
+            final_row = _read_final_row(config["tag"], model_name, result_dir)
+            aggregate_row = {
                 "model": model_name,
-                **{name: config[name] for name in model_setting_names},
-                **variant,
+                "config_signature": _config_signature(config),
+                **config,
+                **{f"input_{name}": value for name, value in variant.items()},
                 **final_row,
-            })
-            _write_aggregate_rows(report_path, aggregate_fields, aggregate_rows)
-            completed_tags.add(config["tag"])
-            _rebuild_batch_artifacts(
-                model_metadata,
-                _select_active_rows(aggregate_rows, variants),
+            }
+            pending_rows = [*aggregate_rows, aggregate_row]
+            _rebuild_all_model_artifacts(
+                metadata_by_model,
+                _select_active_rows(pending_rows, variants),
+                result_dir,
             )
+            _write_aggregate_rows(report_path, aggregate_fields, pending_rows)
+            aggregate_rows = pending_rows
+            completed_tags.add(config["tag"])
+            results_dirs.append((result_dir / config.get("tag", "default")).as_posix())
             completed_count += 1
-            progress_callback(completed_count, total_count, config.get("tag", "default"), "completed")
+            row_finalized = row_finalized or should_finalize()
+            status = "finalized" if row_finalized else "completed"
+            progress_callback(completed_count, total_count, config.get("tag", "default"), status)
+            if row_finalized:
+                break
         except Exception as e:
+            failed_output_dir = result_dir / config.get("tag", "default")
+            try:
+                archive_path(failed_output_dir)
+            except OSError as archive_error:
+                log(f"Could not archive failed output {failed_output_dir}: {archive_error}")
             log(f"Error in batch run {i+1}: {e}")
             progress_callback(completed_count, total_count, config.get("tag", "default"), "failed")
+            failed_rows.append((config.get("tag", "default"), str(e)))
     
-    _rebuild_batch_artifacts(
-        model_metadata,
-        _select_active_rows(aggregate_rows, variants),
-    )
+    if not failed_rows:
+        _rebuild_all_model_artifacts(
+            metadata_by_model,
+            _select_active_rows(aggregate_rows, variants),
+            result_dir,
+        )
     log(f"\n{'='*60}")
     log(f"Batch complete: {len(results_dirs)} simulations finished")
     log(f"Results in: {results_dirs}")
+
+    if failed_rows:
+        failure_text = "; ".join(f"{tag}: {message}" for tag, message in failed_rows)
+        raise BatchExecutionError(f"Batch rows failed: {failure_text}")
     
     return results_dirs
 
@@ -357,7 +448,10 @@ def run_batch(
 if __name__ == "__main__":
     import sys
     
-    csv_file = sys.argv[1] if len(sys.argv) > 1 else "multi.csv"
-    config_file = sys.argv[2] if len(sys.argv) > 2 else "config.json"
-    
-    run_batch(csv_file, config_file)
+    csv_file = sys.argv[1] if len(sys.argv) > 1 else None
+    config_file = sys.argv[2] if len(sys.argv) > 2 else None
+
+    try:
+        run_batch(csv_file, config_file)
+    except ExperimentNotSelectedError as error:
+        raise SystemExit(str(error)) from error

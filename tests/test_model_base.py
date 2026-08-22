@@ -213,7 +213,7 @@ def test_model_base_requests_stop_after_beta_ema_stabilizes():
         assert model.should_stop() is None
 
     reason = None
-    for _ in range(500):
+    for _ in range(60):
         reason = model.should_stop()
         if reason:
             break

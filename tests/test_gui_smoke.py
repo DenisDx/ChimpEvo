@@ -62,6 +62,82 @@ def gui_app(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_gui_bootstraps_active_experiment_from_existing_data_dir(tmp_path, monkeypatch):
+    """Select the first experiment directory and write default.conf when it is missing."""
+    monkeypatch.chdir(tmp_path)
+    experiment_dir = tmp_path / "data" / "exp_alpha"
+    experiment_dir.mkdir(parents=True)
+    (experiment_dir / "config.json").write_text(json.dumps({"model": "model_base"}), encoding="utf-8")
+
+    try:
+        root = tk.Tk()
+    except tk.TclError as error:
+        pytest.skip(f"Tk is unavailable in this environment: {error}")
+
+    root.withdraw()
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "gui_bootstrap")
+    application = SimulationGUI(root)
+    try:
+        assert (tmp_path / "default.conf").read_text(encoding="utf-8").strip() == "exp_alpha"
+        assert Path(application.config_file).resolve() == (experiment_dir / "config.json").resolve()
+    finally:
+        set_logger(None)
+        root.destroy()
+
+
+@pytest.mark.smoke
+def test_gui_switches_to_valid_experiment_before_updating_default(gui_app, tmp_path):
+    """Load target files and then persist the newly active experiment."""
+    experiment_dir = tmp_path / "data" / "exp_beta"
+    experiment_dir.mkdir(parents=True)
+    (experiment_dir / "config.json").write_text(
+        json.dumps({"model": "model_base", "tag": "beta_tag"}),
+        encoding="utf-8",
+    )
+    (experiment_dir / "multi.csv").write_text("tag\nbeta_batch\n", encoding="utf-8")
+    gui_app.experiment_selector.configure(values=["exp_beta"])
+    gui_app.experiment_var.set("exp_beta")
+
+    gui_app._on_experiment_selected()
+
+    assert gui_app.experiment_dir == experiment_dir
+    assert Path(gui_app.config_file) == experiment_dir / "config.json"
+    assert gui_app.batch_path == experiment_dir / "multi.csv"
+    assert gui_app.config["tag"] == "beta_tag"
+    assert (tmp_path / "default.conf").read_text(encoding="utf-8") == "exp_beta"
+
+
+@pytest.mark.smoke
+def test_gui_cancels_dirty_experiment_switch_without_changing_default(gui_app, tmp_path, monkeypatch):
+    """Keep the active experiment unchanged when the dirty-state prompt is cancelled."""
+    current_dir = gui_app.experiment_manager.set_active_experiment("exp_alpha")
+    gui_app.experiment_dir = current_dir
+    gui_app.config_file = str(current_dir / "config.json")
+    gui_app.is_config_dirty = True
+    gui_app.experiment_var.set("exp_beta")
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: None)
+
+    gui_app._on_experiment_selected()
+
+    assert gui_app.experiment_var.get() == "exp_alpha"
+    assert gui_app.experiment_manager.get_active_experiment_name() == "exp_alpha"
+    assert gui_app.experiment_dir == current_dir
+
+
+@pytest.mark.smoke
+def test_gui_cancels_new_experiment_when_dirty_transition_is_cancelled(gui_app, monkeypatch):
+    """Do not prompt for or create an experiment after cancelling dirty-state resolution."""
+    prompts = []
+    gui_app.is_config_dirty = True
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: None)
+    monkeypatch.setattr(gui_app, "_prompt_new_experiment", lambda: prompts.append(True))
+
+    gui_app._on_new_experiment()
+
+    assert prompts == []
+
+
+@pytest.mark.smoke
 def test_gui_constructs_and_updates_valid_settings(gui_app):
     """Construct the GUI and transfer valid controls into memory."""
     gui_app.model_setting_rows["max_population"]["value"].set("500")
@@ -75,6 +151,72 @@ def test_gui_constructs_and_updates_valid_settings(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_uses_persistent_non_modal_progress_window(gui_app):
+    """Keep Progress outside the main tabs and preserve it across show and hide actions."""
+    assert "Progress" not in [gui_app.notebook.tab(tab_id, "text") for tab_id in gui_app.notebook.tabs()]
+    assert gui_app.progress_window.state() == "withdrawn"
+
+    gui_app._show_progress_window()
+    gui_app.root.update_idletasks()
+
+    assert gui_app.progress_window.state() != "withdrawn"
+    gui_app._hide_progress_window()
+    assert gui_app.progress_window.state() == "withdrawn"
+    assert gui_app.progress_window.winfo_exists() == 1
+
+
+@pytest.mark.smoke
+def test_gui_simulation_launch_shows_progress_and_enables_both_stop_buttons(gui_app, monkeypatch):
+    """Open Progress automatically and synchronize its stop control at launch."""
+    thread_starts = []
+
+    class FakeThread:
+        """Record a requested worker start without running a simulation."""
+
+        def __init__(self, target, daemon):
+            """Store the requested worker attributes."""
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            """Record that the GUI requested the worker start."""
+            thread_starts.append(True)
+
+    monkeypatch.setattr(gui_module.threading, "Thread", FakeThread)
+
+    gui_app._launch_simulation()
+    gui_app.root.update_idletasks()
+
+    assert gui_app.progress_window.state() != "withdrawn"
+    assert str(gui_app.stop_btn.cget("state")) == "normal"
+    assert str(gui_app.progress_stop_btn.cget("state")) == "normal"
+    assert str(gui_app.progress_finalize_btn.cget("state")) == "normal"
+    assert thread_starts == [True]
+
+    gui_app._stop_simulation()
+
+    assert str(gui_app.stop_btn.cget("state")) == "disabled"
+    assert str(gui_app.progress_stop_btn.cget("state")) == "disabled"
+    assert str(gui_app.progress_finalize_btn.cget("state")) == "disabled"
+
+
+@pytest.mark.smoke
+def test_gui_progress_finalize_requests_successful_batch_stop(gui_app, monkeypatch):
+    """Request current-row finalization and disable repeated requests."""
+    monkeypatch.setattr(gui_module.threading.Thread, "start", lambda self: None)
+
+    gui_app._launch_batch("selected")
+    gui_app.progress_finalize_btn.invoke()
+
+    assert gui_app.batch_finalize_requested is True
+    assert gui_app.batch_cancel_requested is False
+    assert gui_app.batch_status_var.get() == "Finalization requested"
+    assert gui_app._consume_finalize_request() is True
+    assert gui_app._consume_finalize_request() is False
+    assert str(gui_app.progress_finalize_btn.cget("state")) == "disabled"
+
+
+@pytest.mark.smoke
 def test_gui_model_settings_grid_uses_declared_metadata(gui_app):
     """Create editable model rows from the selected model declarations."""
     max_population_row = gui_app.model_setting_rows["max_population"]
@@ -84,6 +226,34 @@ def test_gui_model_settings_grid_uses_declared_metadata(gui_app):
     assert max_population_row["supported"] is True
     assert max_population_row["bounds"].get() == "100 <= x <= 100000000"
     assert max_population_row["description"].get() == "Population carrying capacity"
+
+
+@pytest.mark.smoke
+def test_gui_tooltips_cover_buttons_settings_and_indicators(gui_app):
+    """Resolve and render concise hints for the requested GUI control groups."""
+    manager = gui_app.tooltips
+    core_widgets = gui_app.core_setting_widgets["max_iterations"]
+    model_widgets = gui_app.model_setting_rows["max_population"]["widgets"]
+
+    assert manager.get_text(gui_app.start_btn) == (
+        "Start one simulation with the current saved configuration."
+    )
+    assert manager.get_text(gui_app.config_dirty_label) == (
+        "Shows whether the configuration has unsaved changes."
+    )
+    assert all(
+        manager.get_text(widget) == "Maximum simulation years"
+        for widget in core_widgets
+    )
+    assert all(
+        manager.get_text(widget) == "Population carrying capacity"
+        for widget in model_widgets
+    )
+
+    manager._widget = gui_app.start_btn
+    manager._show(gui_app.start_btn, manager.get_text(gui_app.start_btn))
+    assert manager._tooltip is not None
+    manager._hide()
 
 
 @pytest.mark.smoke
@@ -187,8 +357,75 @@ def test_gui_batch_start_and_stop_manage_worker_state(gui_app, monkeypatch):
 
 
 @pytest.mark.smoke
-def test_gui_counts_and_clears_aggregate_batch_results(gui_app, monkeypatch, tmp_path):
-    """Expose aggregate completion count and remove results after confirmation."""
+def test_gui_progress_stop_cancels_active_batch(gui_app, monkeypatch):
+    """Enable Progress Stop for batch work and route it to cooperative cancellation."""
+    thread_starts = []
+
+    class FakeThread:
+        """Record batch worker startup without executing it."""
+
+        def __init__(self, target, daemon):
+            """Store worker properties."""
+            self.target = target
+            self.daemon = daemon
+
+        def start(self):
+            """Record the requested worker start."""
+            thread_starts.append(True)
+
+    monkeypatch.setattr(gui_module.threading, "Thread", FakeThread)
+
+    gui_app._launch_batch("selected")
+
+    assert gui_app.is_batch_running is True
+    assert str(gui_app.progress_stop_btn.cget("state")) == "normal"
+    assert thread_starts == [True]
+
+    gui_app.progress_stop_btn.invoke()
+
+    assert gui_app.batch_cancel_requested is True
+    assert gui_app.batch_status_var.get() == "Cancellation requested"
+    assert str(gui_app.progress_stop_btn.cget("state")) == "disabled"
+
+
+@pytest.mark.smoke
+def test_gui_selected_batch_row_keeps_existing_results_when_cancelled(gui_app, monkeypatch, tmp_path):
+    """Require the tag replacement confirmation before launching one selected row."""
+    launches = []
+    selected_tag = "selected"
+    gui_app.batch_columns = ["tag"]
+    gui_app.batch_rows = [{"tag": selected_tag}]
+    gui_app._render_batch_grid()
+    result_file = tmp_path / "result" / selected_tag / "final.csv"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_text("old results", encoding="utf-8")
+    gui_app.batch_tree.selection_set("0")
+    monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_saved_batch_inputs", lambda: True)
+    monkeypatch.setattr(gui_app, "_ask_tag_result_replacement", lambda tag: False)
+    monkeypatch.setattr(gui_app, "_launch_batch", lambda tag: launches.append(tag))
+
+    gui_app._on_run_selected_row()
+
+    assert result_file.read_text(encoding="utf-8") == "old results"
+    assert launches == []
+
+
+@pytest.mark.smoke
+def test_gui_refresh_reschedules_after_display_error(gui_app, monkeypatch):
+    """Keep the periodic GUI refresh alive when one display update fails."""
+    schedules = []
+    monkeypatch.setattr(gui_app, "_apply_gui_refresh", lambda: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(gui_app, "_schedule_gui_refresh", lambda: schedules.append(True))
+
+    gui_app._refresh_gui()
+
+    assert schedules == [True]
+
+
+@pytest.mark.smoke
+def test_gui_counts_and_archives_aggregate_batch_results(gui_app, monkeypatch, tmp_path):
+    """Expose aggregate completion count and archive results after confirmation."""
     result_dir = tmp_path / "result"
     result_dir.mkdir()
     (result_dir / "result.csv").write_text("model,tag\nmodel_base,first\nmodel_base,second\n")
@@ -199,6 +436,7 @@ def test_gui_counts_and_clears_aggregate_batch_results(gui_app, monkeypatch, tmp
     gui_app._clear_result_directory()
 
     assert not result_dir.exists()
+    assert len(list(tmp_path.glob("result_*.bak"))) == 1
 
 
 @pytest.mark.smoke
@@ -245,8 +483,8 @@ def test_gui_dirty_start_cancels_without_launching(gui_app, monkeypatch):
 
 
 @pytest.mark.smoke
-def test_gui_single_start_replaces_existing_tag_results(gui_app, monkeypatch, tmp_path):
-    """Delete only the active tag directory before starting after confirmation."""
+def test_gui_single_start_archives_existing_tag_results(gui_app, monkeypatch, tmp_path):
+    """Archive only the active tag directory before starting after confirmation."""
     starts = []
     result_dir = tmp_path / "result" / gui_app.config["tag"]
     result_dir.mkdir(parents=True)
@@ -257,6 +495,7 @@ def test_gui_single_start_replaces_existing_tag_results(gui_app, monkeypatch, tm
     gui_app._start_simulation()
 
     assert not result_dir.exists()
+    assert len(list((tmp_path / "result").glob(f"{gui_app.config['tag']}_*.bak"))) == 1
     assert starts == [True]
 
 
@@ -415,3 +654,172 @@ def test_gui_stop_handler_clears_running_state(gui_app):
     gui_app._stop_simulation()
 
     assert gui_app.is_running is False
+
+
+@pytest.mark.smoke
+def test_gui_dirty_indicators_are_independent_and_blue_when_modified(gui_app):
+    """Show separate synchronized config and batch dirty indicators in the top panel."""
+    gui_app._set_config_dirty(True)
+
+    assert gui_app.config_dirty_var.get() == "Config modified"
+    assert gui_app.config_dirty_label.cget("foreground") == "#0067c0"
+    assert gui_app.batch_dirty_var.get() == "Batch saved"
+
+    gui_app._set_batch_dirty(True)
+    gui_app._set_config_dirty(False)
+
+    assert gui_app.config_dirty_var.get() == "Config saved"
+    assert gui_app.batch_dirty_var.get() == "Batch modified"
+    assert gui_app.batch_dirty_label.cget("foreground") == "#0067c0"
+
+
+@pytest.mark.smoke
+def test_gui_progress_shows_single_and_batch_calculation_sources(gui_app):
+    """Display a tag plus default-config or full batch-row source in Progress."""
+    gui_app._set_progress_calculation("single")
+
+    assert gui_app.progress_tag_var.get() == "single"
+    assert gui_app.progress_source_var.get() == "Default config"
+
+    gui_app.batch_rows = [{"tag": "batch_a", "model": "model_base", "mutation_x": "0.2"}]
+    gui_app._update_batch_status(0, 1, "batch_a", "running")
+
+    assert gui_app.progress_tag_var.get() == "batch_a"
+    assert gui_app.progress_source_var.get() == "Batch row: tag=batch_a, model=model_base, mutation_x=0.2"
+
+
+@pytest.mark.smoke
+def test_gui_log_autoscroll_can_be_disabled(gui_app, monkeypatch):
+    """Scroll new log messages only while the Progress checkbox is enabled."""
+    scroll_calls = []
+    monkeypatch.setattr(gui_app.log_text, "see", lambda position: scroll_calls.append(position))
+    gui_app._gui_log_messages.put("first")
+
+    gui_app._apply_gui_refresh()
+
+    assert gui_app.log_autoscroll_var.get() is True
+    assert scroll_calls == [tk.END]
+
+    gui_app.log_autoscroll_var.set(False)
+    gui_app._gui_log_messages.put("second")
+    gui_app._apply_gui_refresh()
+
+    assert scroll_calls == [tk.END]
+    assert "second" in gui_app.log_text.get("1.0", tk.END)
+
+
+@pytest.mark.smoke
+def test_gui_batch_model_option_and_delete_column(gui_app):
+    """Offer model as a batch column and delete optional columns from every row."""
+    assert "model" in tuple(gui_app.batch_column_selector.cget("values"))
+    gui_app.batch_columns = ["tag", "model"]
+    gui_app.batch_rows = [{"tag": "run", "model": "model_base"}]
+    gui_app.batch_column_var.set("model")
+
+    gui_app._delete_batch_column()
+
+    assert gui_app.batch_columns == ["tag"]
+    assert gui_app.batch_rows == [{"tag": "run"}]
+    assert gui_app.is_batch_dirty is True
+
+
+@pytest.mark.smoke
+def test_gui_dirty_transition_names_current_experiment(gui_app, monkeypatch):
+    """Identify the experiment whose unsaved changes are being resolved."""
+    prompts = []
+    gui_app.experiment_manager.set_active_experiment("exp_alpha")
+    gui_app._set_config_dirty(True)
+    monkeypatch.setattr(
+        gui_module.messagebox,
+        "askyesnocancel",
+        lambda title, message: prompts.append((title, message)),
+    )
+
+    assert gui_app._confirm_experiment_transition() is False
+    assert "exp_alpha" in prompts[0][1]
+
+
+@pytest.mark.smoke
+def test_gui_deletes_active_experiment_and_selects_next(gui_app, tmp_path, monkeypatch):
+    """Delete the confirmed active experiment and activate another available one."""
+    manager = gui_app.experiment_manager
+    alpha_dir = manager.create_experiment("exp_alpha", {"model": "model_base"})
+    manager.create_experiment("exp_beta", {"model": "model_base"}, activate=False)
+    gui_app.experiment_dir = alpha_dir
+    gui_app.config_file = str(alpha_dir / "config.json")
+    gui_app._set_config_dirty(False)
+    gui_app._set_batch_dirty(False)
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
+
+    gui_app._on_delete_experiment()
+
+    assert not alpha_dir.exists()
+    assert manager.get_active_experiment_name() == "exp_beta"
+    assert gui_app.experiment_dir == tmp_path / "data" / "exp_beta"
+
+
+@pytest.mark.smoke
+def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_app):
+    """Offer discovered models in a usable dialog and create files from the selection."""
+    gui_app.root.deiconify()
+    gui_app.root.update_idletasks()
+    selected_model = next(model for model in gui_app.available_models if model != "model_base")
+    observed = {}
+
+    def descendants(widget):
+        """Return every nested Tk child below one widget."""
+        children = list(widget.winfo_children())
+        return children + [nested for child in children for nested in descendants(child)]
+
+    def complete_dialog():
+        """Inspect and submit the live modal new-experiment form."""
+        dialog = next(
+            child
+            for child in gui_app.root.winfo_children()
+            if isinstance(child, tk.Toplevel) and child.title() == "New Experiment"
+        )
+        gui_app.root.update_idletasks()
+        widgets = descendants(dialog)
+        name_entry = next(widget for widget in widgets if widget.winfo_class() == "TEntry")
+        model_selector = next(widget for widget in widgets if widget.winfo_class() == "TCombobox")
+        create_button = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Create"
+        )
+        observed["minsize"] = tuple(dialog.minsize())
+        observed["state"] = str(model_selector.cget("state"))
+        observed["models"] = tuple(model_selector.cget("values"))
+        observed["explanation"] = next(
+            widget.cget("text")
+            for widget in widgets
+            if widget.winfo_class() == "Message"
+        )
+        observed["position"] = (dialog.winfo_x(), dialog.winfo_y())
+        observed["expected_position"] = (
+            max(0, gui_app.root.winfo_rootx() + (gui_app.root.winfo_width() - dialog.winfo_width()) // 2),
+            max(0, gui_app.root.winfo_rooty() + (gui_app.root.winfo_height() - dialog.winfo_height()) // 2),
+        )
+        name_entry.insert(0, "selected_model")
+        model_selector.set(selected_model)
+        create_button.invoke()
+
+    gui_app.root.after(0, complete_dialog)
+    experiment_dir = gui_app._prompt_new_experiment()
+
+    config = json.loads((experiment_dir / "config.json").read_text(encoding="utf-8"))
+    selected_metadata = validate_model_metadata(gui_module.load_model_class(selected_model))
+    assert observed["minsize"] == (520, 260)
+    assert observed["state"] == "readonly"
+    assert observed["models"] == tuple(gui_app.available_models)
+    assert "can be switched at any time" in observed["explanation"]
+    assert "data/<name>/" in observed["explanation"]
+    assert "default.conf" in observed["explanation"]
+    assert "active experiment" in observed["explanation"]
+    assert observed["position"] == observed["expected_position"]
+    assert config["model"] == selected_model
+    assert all(
+        config[name] == details["default"]
+        for name, details in selected_metadata["settings"].items()
+    )
+    assert (experiment_dir / "multi.csv").is_file()

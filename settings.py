@@ -19,6 +19,7 @@ DEFAULT_SETTINGS = {
     "device": "cuda",  # "cuda" or "cpu"
     "model": "model_base",  # dynamic model module name
     "seed": 0,  # zero selects a random seed; nonzero values are deterministic
+    "oldest_death_percent": 0.1,  # oldest death subset used by beta-model statistics
 }
 
 # Validation ranges for GUI
@@ -59,6 +60,7 @@ PARAMETER_DESCRIPTIONS = {
     "max_iterations": "Maximum simulation years",
     "device": "Compute device (CUDA or CPU)",
     "model": "Dynamic model module",
+    "tag": "Result folder and run identifier",
     "seed": "Optional deterministic random seed",
 }
 
