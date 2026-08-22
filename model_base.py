@@ -60,11 +60,13 @@ class Model_base(Model):
                 "type": "float", "min": 0.0, "max": 0.5,
             },
             "mutation_x": {
-                "description": "Mutation effect size", "default": 1.0,
+                "description": "Mutation half-width X. The beta shift is sampled from [-X + S*X, X + S*X].",
+                "default": 1.0,
                 "type": "float", "min": 0.0, "max": 10.0,
             },
             "mutation_s": {
-                "description": "Mutation asymmetry", "default": 0.0,
+                "description": "Mutation asymmetry S. It moves the interval center by S*X: [-X + S*X, X + S*X].",
+                "default": 0.0,
                 "type": "float", "min": -1.0, "max": 1.0,
             },
             "stop_beta_change_threshold": {

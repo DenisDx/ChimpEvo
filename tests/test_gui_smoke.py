@@ -234,6 +234,8 @@ def test_gui_tooltips_cover_buttons_settings_and_indicators(gui_app):
     manager = gui_app.tooltips
     core_widgets = gui_app.core_setting_widgets["max_iterations"]
     model_widgets = gui_app.model_setting_rows["max_population"]["widgets"]
+    mutation_x_widgets = gui_app.model_setting_rows["mutation_x"]["widgets"]
+    mutation_s_widgets = gui_app.model_setting_rows["mutation_s"]["widgets"]
 
     assert manager.get_text(gui_app.start_btn) == (
         "Start one simulation with the current saved configuration."
@@ -248,6 +250,16 @@ def test_gui_tooltips_cover_buttons_settings_and_indicators(gui_app):
     assert all(
         manager.get_text(widget) == "Population carrying capacity"
         for widget in model_widgets
+    )
+    assert all(
+        manager.get_text(widget)
+        == "Mutation half-width X. The beta shift is sampled from [-X + S*X, X + S*X]."
+        for widget in mutation_x_widgets
+    )
+    assert all(
+        manager.get_text(widget)
+        == "Mutation asymmetry S. It moves the interval center by S*X: [-X + S*X, X + S*X]."
+        for widget in mutation_s_widgets
     )
 
     manager._widget = gui_app.start_btn

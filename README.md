@@ -39,7 +39,7 @@ Where:
 When offspring are produced during reproduction, one of two outcomes occurs with specified probabilities:
 
 **With probability `mutation_probability`** (mutation occurs):
-$$\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \text{Uniform} \left( [-X + SX, X + SX] \right)$$
+$$\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \text{Uniform} \left( [-X + S \times X, X + S \times X] \right)$$
 
 **With probability `(1 - mutation_probability)`** (no mutation):
 $$\beta_{new} = \frac{\beta_1 + \beta_2}{2}$$
@@ -51,9 +51,10 @@ Where:
   - $S > 0$ → shifted toward positive changes
   - $S < 0$ → shifted toward negative changes
 
-**Example**: If $X = 2$ and $S = 0.5$:
-- Mutation interval: $[-2 + 0.5 \times 2, 2 + 0.5 \times 2] = [-1, 3]$
-- With `mutation_probability`: draw shift $\Delta\beta = \text{Uniform}(-1, 3)$, then
+**Example**: If $X = 3$ and $S = 0.5$:
+- Asymmetry shift: $S \times X = 0.5 \times 3 = 1.5$
+- Mutation interval: $[-3 + 1.5, 3 + 1.5] = [-1.5, 4.5]$
+- With `mutation_probability`: draw shift $\Delta\beta = \text{Uniform}(-1.5, 4.5)$, then
   $\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \Delta\beta$
 - Without mutation: $\beta_{new} = \frac{\beta_1 + \beta_2}{2}$
 
@@ -405,7 +406,7 @@ Initializes empty model. Call `initialize_population()` next.
   ```python
   child_beta = model.mutate_beta(0.10, 0.12)
   # 90% chance: child_beta = (0.10 + 0.12) / 2 = 0.11
-  # For X=2 and S=0.5, the mutation shift is Uniform(-1, 3).
+  # For X=3 and S=0.5, S*X=1.5 and the mutation shift is Uniform(-1.5, 4.5).
   # If the sampled shift is 1.5: child_beta = 0.11 + 1.5 = 1.61
   ```
 

@@ -48,17 +48,20 @@ The interval `[-X + S*X, X + S*X]` has half-width `X`, total width `2X`, and cen
 **Old text (exactly)**
 
 ```text
+- Mutation interval: [-2 + 0.5·2, 2 + 0.5·2] = [-1, 3]
 - If mutation occurs: β_new is randomly selected from [-1, 3]
 ```
 
 **Reason**
 
-For `X = 2` and `S = 0.5`, `[-1, 3]` is the interval for the mutation shift, not the absolute offspring beta.
+Using `X = 2` makes `S*X` visually indistinguishable from the incorrect `S*2`. The example also treats the interval as absolute offspring beta instead of an additive shift.
 
 **Recommended new text**
 
 ```text
-- If mutation occurs: delta_beta is randomly selected from [-1, 3], then beta_new = (beta_parent1 + beta_parent2) / 2 + delta_beta
+- Example: If X = 3 and S = 0.5, the asymmetry shift is S*X = 0.5*3 = 1.5.
+- Mutation interval: [-3 + 1.5, 3 + 1.5] = [-1.5, 4.5].
+- If mutation occurs: delta_beta is randomly selected from [-1.5, 4.5], then beta_new = (beta_parent1 + beta_parent2) / 2 + delta_beta.
 ```
 
 ## Align mutation parameter ranges with runtime validation
