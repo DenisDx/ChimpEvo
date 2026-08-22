@@ -45,8 +45,8 @@ $$\beta_{new} = \frac{\beta_1 + \beta_2}{2} + \text{Uniform} \left( [-X + SX, X 
 $$\beta_{new} = \frac{\beta_1 + \beta_2}{2}$$
 
 Where:
-- $X$ = effect size of mutations (`mutation_x`): larger values allow wider variation
-- $S$ = asymmetry parameter (`mutation_s`), range $-1 < S < 1$
+- $X$ = effect size of mutations (`mutation_x`): the interval half-width
+- $S$ = asymmetry parameter (`mutation_s`), range $-1 \le S \le 1$; its shift is $S \times X$, not $S \times 2$
   - $S = 0$ → symmetric interval $[-X, X]$
   - $S > 0$ → shifted toward positive changes
   - $S < 0$ → shifted toward negative changes
@@ -255,7 +255,7 @@ The GUI's **Load Config** accepts a JSON object and prepares it in unsaved GUI m
 | mature_age | int | 12 | [1, 50] | Minimum age for sexual maturity/reproduction |
 | fecundity | float | 1.0 | [0, 10] | Maximum offspring per mature animal per year (controls annual growth rate) |
 | mutation_probability | float | 0.1 | [0, 0.5] | Probability that offspring undergo mutation (vs inheriting average) |
-| mutation_x | float | 1.0 | [0, 10] | Effect size (X): defines mutation interval width |
+| mutation_x | float | 1.0 | [0, 10] | Effect size (X): defines mutation interval half-width; total width is 2X |
 | mutation_s | float | 0.0 | [-1, 1] | Asymmetry (S): skews mutation interval toward positive/negative |
 | oldest_death_percent | float | 0.1 | (0, 1] | Oldest population share used for the death-age metric |
 | graph_generation_period | int | 1 | [1, 1000] | Generate yearly `distributionN/survivorshipN/betaoccurrenceN` graphs every N iterations |
@@ -384,7 +384,9 @@ Initializes empty model. Call `initialize_population()` next.
 
 - **Algorithm**:
   - With probability `mutation_probability`: 
-    - Draw random value from $[-X + SX, X + SX]$
+    - Calculate the interval $[-X + S \times X, X + S \times X]$
+    - Draw mutation shift $\Delta\beta$ from that interval
+    - Add the shift to the parental average: $\beta_{new} = (\beta_1 + \beta_2)/2 + \Delta\beta$
   - With probability `1 - mutation_probability`:
     - Average the two parents: $\frac{\beta_1 + \beta_2}{2}$
   
@@ -403,7 +405,8 @@ Initializes empty model. Call `initialize_population()` next.
   ```python
   child_beta = model.mutate_beta(0.10, 0.12)
   # 90% chance: child_beta = (0.10 + 0.12) / 2 = 0.11
-  # 10% chance: child_beta = Uniform(-1, 3) e.g., 1.5
+  # For X=2 and S=0.5, the mutation shift is Uniform(-1, 3).
+  # If the sampled shift is 1.5: child_beta = 0.11 + 1.5 = 1.61
   ```
 
 ---

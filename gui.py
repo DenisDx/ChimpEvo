@@ -85,6 +85,8 @@ class TooltipManager:
         explicit_text = self._texts.get(str(widget))
         if explicit_text:
             return explicit_text
+        if not isinstance(widget, tk.Misc):
+            return None
         try:
             if widget.winfo_class() == "TButton":
                 return BUTTON_TOOLTIPS.get(widget.cget("text"))
@@ -598,6 +600,7 @@ class SimulationGUI:
         dialog.minsize(520, 260)
         dialog.transient(self.root)
         dialog.columnconfigure(1, weight=1)
+        dialog.rowconfigure(3, weight=1)
 
         explanation = tk.Message(
             dialog,
@@ -670,7 +673,14 @@ class SimulationGUI:
             dialog.destroy()
 
         buttons = ttk.Frame(dialog)
-        buttons.grid(row=2, column=0, columnspan=2, sticky=tk.E, padx=20, pady=(18, 16))
+        buttons.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky=tk.SE,
+            padx=20,
+            pady=(18, 16),
+        )
         ttk.Button(buttons, text="Create", command=create).pack(side=tk.LEFT, padx=(0, 8))
         ttk.Button(buttons, text="Cancel", command=cancel).pack(side=tk.LEFT)
         dialog.protocol("WM_DELETE_WINDOW", cancel)

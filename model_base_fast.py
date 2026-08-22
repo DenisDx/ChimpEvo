@@ -2,7 +2,7 @@
 
 import torch
 
-from model_base import Model_base
+from model_base import Model_base, mutation_interval
 
 
 class Model_base_fast(Model_base):
@@ -41,8 +41,7 @@ class Model_base_fast(Model_base):
         if mutation_mask.any():
             mutation_x = self.settings["mutation_x"]
             mutation_s = self.settings["mutation_s"]
-            lower = -mutation_x + mutation_s * mutation_x
-            upper = mutation_x + mutation_s * mutation_x
+            lower, upper = mutation_interval(mutation_x, mutation_s)
             mutation_shifts = torch.empty(
                 birth_count,
                 dtype=self.population.dtype,

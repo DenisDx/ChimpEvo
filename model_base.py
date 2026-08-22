@@ -9,6 +9,12 @@ import torch
 from model import Model
 
 
+def mutation_interval(mutation_x, mutation_s):
+    """Return mutation-shift bounds from effect size X and asymmetry S."""
+    shift = mutation_s * mutation_x
+    return -mutation_x + shift, mutation_x + shift
+
+
 class Model_base(Model):
     """Provide the current beta model through the dynamic-model naming contract."""
 
@@ -230,8 +236,7 @@ x_2.0,2.0
 
         mutation_x = self.settings["mutation_x"]
         mutation_s = self.settings["mutation_s"]
-        lower = -mutation_x + mutation_s * mutation_x
-        upper = mutation_x + mutation_s * mutation_x
+        lower, upper = mutation_interval(mutation_x, mutation_s)
         return base_beta + random.uniform(lower, upper)
 
     def apply_reproduction(self):

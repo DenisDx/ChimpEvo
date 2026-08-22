@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from model import Model
-from model_base import Model_base
+from model_base import Model_base, mutation_interval
 from model_base_fast import Model_base_fast
 from model_base_fast_fixed_fecundity import Model_base_fecundity
 from settings import DEFAULT_SETTINGS
@@ -36,6 +36,13 @@ def run_model_year():
     model.age_population()
     deaths = model.apply_mortality()
     return model.population, births, deaths
+
+
+@pytest.mark.smoke
+def test_mutation_interval_scales_asymmetry_by_mutation_x():
+    """Center the mutation interval at S times X with half-width X."""
+    assert mutation_interval(2.0, 0.5) == pytest.approx((-1.0, 3.0))
+    assert mutation_interval(4.0, 0.5) == pytest.approx((-2.0, 6.0))
 
 
 @pytest.mark.smoke
