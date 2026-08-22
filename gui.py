@@ -6,6 +6,9 @@ Allows parameter configuration, execution control, and result visualization
 import json
 import csv
 import io
+import os
+import subprocess
+import sys
 import threading
 import time
 import queue
@@ -32,6 +35,7 @@ CORE_SETTING_NAMES = (
 BUTTON_TOOLTIPS = {
     "New Experiment": "Create an experiment from the selected model defaults.",
     "Delete Experiment": "Delete the active experiment and all of its stored data.",
+    "Open In File Explorer": "Open the selected experiment directory in the system file manager.",
     "Load Model": "Load the selected model and its declared settings.",
     "Load All Model Defaults": "Reset configuration and batch values to the active model defaults.",
     "Start Simulation": "Start one simulation with the current saved configuration.",
@@ -373,6 +377,12 @@ class SimulationGUI:
             text="Delete Experiment",
             command=self._on_delete_experiment,
         ).pack(side=tk.LEFT, padx=5)
+        self.open_experiment_dir_button = ttk.Button(
+            experiment_frame,
+            text="Open In File Explorer",
+            command=self._on_open_experiment_dir,
+        )
+        self.open_experiment_dir_button.pack(side=tk.LEFT, padx=5)
         self.config_dirty_var = tk.StringVar(value="Config saved")
         self.config_dirty_label = tk.Label(
             experiment_frame,
@@ -751,6 +761,26 @@ class SimulationGUI:
             self._activate_experiment(experiment_dir.name)
         except (ModelLoadError, OSError, ValueError) as error:
             messagebox.showerror("Experiment error", str(error))
+
+    def _on_open_experiment_dir(self):
+        """Open the selected experiment directory in the system file manager."""
+        experiment_dir = (
+            self.experiment_manager.project_root
+            / self.experiment_manager.data_dir_name
+            / self.experiment_var.get()
+        )
+        try:
+            if sys.platform == "win32":
+                os.startfile(experiment_dir)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(experiment_dir)])
+            else:
+                subprocess.Popen(["xdg-open", str(experiment_dir)])
+        except OSError as error:
+            messagebox.showerror(
+                "Open Experiment",
+                f"Could not open experiment directory:\n{experiment_dir}\n\n{error}",
+            )
 
     def _confirm_experiment_transition(self):
         """Resolve unsaved config and batch changes before leaving an experiment."""

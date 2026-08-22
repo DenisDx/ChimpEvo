@@ -771,6 +771,40 @@ def test_gui_deletes_active_experiment_and_selects_next(gui_app, tmp_path, monke
 
 
 @pytest.mark.smoke
+def test_gui_opens_selected_experiment_in_platform_file_manager(gui_app, monkeypatch):
+    """Open the selected experiment directory with each supported platform command."""
+    selected_dir = gui_app.experiment_manager.create_experiment(
+        "exp_beta",
+        {"model": "model_base"},
+        activate=False,
+    )
+    gui_app.experiment_var.set("exp_beta")
+    startfile_calls = []
+    process_calls = []
+    monkeypatch.setattr(gui_module.os, "startfile", startfile_calls.append)
+    monkeypatch.setattr(gui_module.subprocess, "Popen", process_calls.append)
+
+    monkeypatch.setattr(gui_module.sys, "platform", "win32")
+    gui_app._on_open_experiment_dir()
+    monkeypatch.setattr(gui_module.sys, "platform", "darwin")
+    gui_app._on_open_experiment_dir()
+    monkeypatch.setattr(gui_module.sys, "platform", "linux")
+    gui_app._on_open_experiment_dir()
+
+    assert startfile_calls == [selected_dir]
+    assert process_calls == [
+        ["open", str(selected_dir)],
+        ["xdg-open", str(selected_dir)],
+    ]
+    siblings = gui_app.open_experiment_dir_button.master.pack_slaves()
+    button_index = siblings.index(gui_app.open_experiment_dir_button)
+    assert siblings[button_index - 1].cget("text") == "Delete Experiment"
+    assert gui_app.tooltips.get_text(gui_app.open_experiment_dir_button) == (
+        "Open the selected experiment directory in the system file manager."
+    )
+
+
+@pytest.mark.smoke
 def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_app):
     """Offer discovered models in a usable dialog and create files from the selection."""
     gui_app.root.deiconify()
