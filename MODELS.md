@@ -27,3 +27,11 @@ models, and any other brief operational notes.
 - **Key settings:** `mutation_z` is the sign bias $Z$ in $[-1, 1]$. The positive branch is selected with probability $(Z+1)/2$.
 - **Difference:** After mutation occurs, the model samples either $U(0, X(S+1))$ or $U(X(S-1), 0)$. $Z$ controls branch probability, while $S$ controls the two interval lengths.
 - **Equivalence:** When $Z=S$, the mixture is distributionally equivalent to the parent model's $U(X(S-1), X(S+1))$ mutation shift. Exact seeded trajectories may differ because branch selection consumes an additional random draw.
+
+## model_base_diploid
+
+- **Purpose:** Add diploid beta inheritance to `model_base_z` while preserving fixed parent fecundity, Z-biased mutations, and existing mortality/output behavior.
+- **Key settings:** No new settings. The model inherits `mutation_probability`, $X$, $S$, and $Z$.
+- **Inheritance:** A child independently receives one random allele (`beta1` or `beta2`) from each parent. Each inherited allele has its own mutation-probability check and, when selected, its own independently sampled X/S/Z shift.
+- **Codominance:** The stored phenotype is $beta=(beta1+beta2)/2$. Both allele sets contribute equally because beta represents the aggregate behavior of many genes rather than dominance at a single gene.
+- **Compatibility:** Population rows keep public `beta` at column 1 and store private `beta1` and `beta2` after it. Mortality, beta statistics, graphs, and stabilization remain inherited and consume the stored phenotype.

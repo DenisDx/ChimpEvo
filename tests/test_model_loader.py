@@ -82,6 +82,11 @@ def test_project_discovery_includes_default_model():
     )
     assert "model_base_z" in discover_models(project_root)
     assert load_model_class("model_base_z", project_root).__name__ == "Model_base_z"
+    assert "model_base_diploid" in discover_models(project_root)
+    assert (
+        load_model_class("model_base_diploid", project_root).__name__
+        == "Model_base_diploid"
+    )
 
 
 @pytest.mark.smoke
@@ -93,6 +98,7 @@ def test_bundled_models_expose_explicit_structured_descriptions():
         "model_base_fast": "# Fast beta/Gompertz model",
         "model_base_fast_fixed_fecundity": "# Fast beta model with fixed parent fecundity",
         "model_base_z": "# Fast fixed-fecundity beta model with mutation sign bias Z",
+        "model_base_diploid": "# Diploid beta model",
     }
 
     placeholder = Model.description()

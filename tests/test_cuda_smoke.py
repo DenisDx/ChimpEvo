@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from model_base import Model_base
+from model_base_diploid import Model_base_diploid
 from model_base_z import Model_base_z
 from settings import DEFAULT_SETTINGS
 
@@ -54,3 +55,19 @@ def test_model_initializes_and_calculates_mortality_on_cuda():
     assert z_model.apply_reproduction() == 2
     assert z_model.population.device.type == "cuda"
     assert z_model.population.shape == (6, 2)
+
+    diploid_model = Model_base_diploid(z_settings, device)
+    diploid_model._set_population(torch.tensor([
+        [2.0, 0.15, 0.10, 0.20],
+        [2.0, 0.35, 0.30, 0.40],
+        [2.0, 0.55, 0.50, 0.60],
+        [2.0, 0.75, 0.70, 0.80],
+    ], dtype=torch.float32, device=device))
+
+    assert diploid_model.apply_reproduction() == 2
+    assert diploid_model.population.device.type == "cuda"
+    assert diploid_model.population.shape == (6, 4)
+    torch.testing.assert_close(
+        diploid_model.population[-2:, 1],
+        diploid_model.population[-2:, 2:].mean(dim=1),
+    )
