@@ -83,6 +83,29 @@ def test_project_discovery_includes_default_model():
 
 
 @pytest.mark.smoke
+def test_bundled_models_expose_explicit_structured_descriptions():
+    """Require a custom purpose, inheritance, and difference description per model."""
+    project_root = Path(__file__).resolve().parents[1]
+    expected_titles = {
+        "model_base": "# Baseline beta/Gompertz model",
+        "model_base_fast": "# Fast beta/Gompertz model",
+        "model_base_fast_fixed_fecundity": "# Fast beta model with fixed parent fecundity",
+    }
+
+    placeholder = Model.description()
+    assert "Replace this text" in placeholder
+    assert "## Inheritance" in placeholder
+    for model_name, expected_title in expected_titles.items():
+        model_class = load_model_class(model_name, project_root)
+        description = model_class.description()
+        assert "description" in model_class.__dict__
+        assert description.startswith(expected_title)
+        assert "## Purpose" in description
+        assert "## Inheritance" in description
+        assert "## Difference from its parent" in description
+
+
+@pytest.mark.smoke
 def test_load_model_class_rejects_invalid_metadata(tmp_path):
     """Wrap strict metadata failures in the loader's public error type."""
     write_model(

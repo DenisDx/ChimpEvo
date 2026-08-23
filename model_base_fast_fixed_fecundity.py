@@ -60,3 +60,34 @@ class Model_base_fecundity(Model_base):
 
 class Model_base_fast_fixed_fecundity(Model_base_fecundity):
     """Expose the per-parent fecundity model through the loader naming contract."""
+
+    @staticmethod
+    def description():
+        """Return the fixed-fecundity model description as lightweight Markdown."""
+        return """# Fast beta model with fixed parent fecundity
+
+## Purpose
+
+Studies beta/Gompertz evolution when every mature animal has a limited annual
+reproductive capacity, while retaining batched Torch execution.
+
+## Inheritance
+
+Inherits the baseline biology from `Model_base` through
+`Model_base_fecundity`.
+
+## Difference from its parent
+
+- Gives each mature animal `floor(fecundity)` parent slots per year.
+- Each offspring consumes two slots, one for each selected parent.
+- A parent cannot participate after all of its annual slots are consumed.
+- Fractional fecundity is ignored because participation in one birth is
+    indivisible.
+
+With `N_mature` mature animals, annual births are bounded by:
+
+$$births <= floor(N_mature * floor(fecundity) / 2)$$
+
+Sexes are not modeled. Mortality, beta inheritance, mutation, outputs, and
+stopping behavior remain those of `Model_base`.
+"""

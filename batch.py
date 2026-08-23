@@ -254,6 +254,7 @@ def run_batch(
     should_finalize=None,
     progress_callback=None,
     graph_callback=None,
+    performance_callback=None,
     result_dir=None,
     selected_tag=None,
 ):
@@ -265,6 +266,8 @@ def run_batch(
         should_cancel: optional callback checked before and during each row
         should_finalize: optional callback that finalizes the current row and batch
         progress_callback: callback(completed, total, tag, status) for row updates
+        graph_callback: callback(output_dir, year) for generated graph frames
+        performance_callback: callback(elapsed_seconds, years, processed_animals)
         result_dir: directory containing aggregate and tag-specific results
         selected_tag: optional single validated batch tag to execute
         
@@ -381,6 +384,7 @@ def run_batch(
                 should_finalize=finalize_current_row,
                 return_completion=True,
                 graph_callback=graph_callback,
+                performance_callback=performance_callback,
                 result_root=result_dir,
             )
             if not completed:

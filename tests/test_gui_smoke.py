@@ -45,6 +45,28 @@ def test_model_selection_normalizes_declared_settings_without_removing_inactive_
     assert corrected_names == ["max_population"]
 
 
+@pytest.mark.smoke
+def test_lightweight_markdown_view_renders_supported_elements(gui_app):
+    """Render headings, bullets, bold, code, and formulas without marker text."""
+    view = gui_module.LightweightMarkdownView(gui_app.root)
+    view.set_markdown(
+        "# Model title\n\n## Purpose\n\n"
+        "A **bold** value and `setting`.\n\n"
+        "- First item\n\n$$value = exp(beta * age)$$"
+    )
+
+    rendered = view.text.get("1.0", "end-1c")
+    assert "Model title" in rendered
+    assert "First item" in rendered
+    assert "value = exp(beta * age)" in rendered
+    assert "**" not in rendered
+    assert "`" not in rendered
+    assert str(view.text.cget("state")) == "disabled"
+    for tag_name in ("heading1", "heading2", "bold", "code", "formula", "bullet"):
+        assert view.text.tag_ranges(tag_name)
+    view.destroy()
+
+
 @pytest.fixture
 def gui_app(tmp_path, monkeypatch):
     """Create and destroy a hidden GUI rooted in a temporary directory."""
@@ -214,6 +236,33 @@ def test_gui_progress_finalize_requests_successful_batch_stop(gui_app, monkeypat
     assert gui_app._consume_finalize_request() is True
     assert gui_app._consume_finalize_request() is False
     assert str(gui_app.progress_finalize_btn.cget("state")) == "disabled"
+
+
+@pytest.mark.smoke
+def test_gui_progress_displays_batch_performance(gui_app, monkeypatch):
+    """Display nonzero speed statistics reported by the active batch row."""
+    def fake_run_batch(*args, **kwargs):
+        """Report one deterministic batch performance snapshot."""
+        kwargs["performance_callback"](2.0, 4, 1000)
+
+    monkeypatch.setattr(gui_module, "run_batch", fake_run_batch)
+    monkeypatch.setattr(
+        gui_app.root,
+        "after",
+        lambda delay, callback, *args: (
+            callback(*args)
+            if len(args) == 3
+            else None
+        ),
+    )
+    gui_app.is_batch_running = True
+    gui_app.batch_selected_tag = None
+
+    gui_app._run_batch_thread()
+
+    assert gui_app.stat_elapsed_time.cget("text") == "2.000 s"
+    assert gui_app.stat_avg_iteration.cget("text") == "0.500000 s"
+    assert gui_app.stat_avg_element.cget("text") == "2000.000 μs"
 
 
 @pytest.mark.smoke
@@ -828,6 +877,7 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
         widgets = descendants(dialog)
         name_entry = next(widget for widget in widgets if widget.winfo_class() == "TEntry")
         model_selector = next(widget for widget in widgets if widget.winfo_class() == "TCombobox")
+        description_text = next(widget for widget in widgets if widget.winfo_class() == "Text")
         create_button = next(
             widget
             for widget in widgets
@@ -848,6 +898,9 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
         )
         name_entry.insert(0, "selected_model")
         model_selector.set(selected_model)
+        model_selector.event_generate("<<ComboboxSelected>>")
+        gui_app.root.update_idletasks()
+        observed["description"] = description_text.get("1.0", "end-1c")
         create_button.invoke()
 
     gui_app.root.after(0, complete_dialog)
@@ -855,13 +908,17 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
 
     config = json.loads((experiment_dir / "config.json").read_text(encoding="utf-8"))
     selected_metadata = validate_model_metadata(gui_module.load_model_class(selected_model))
-    assert observed["minsize"] == (520, 260)
+    assert observed["minsize"] == (620, 480)
     assert observed["state"] == "readonly"
     assert observed["models"] == tuple(gui_app.available_models)
     assert "can be switched at any time" in observed["explanation"]
     assert "data/<name>/" in observed["explanation"]
     assert "default.conf" in observed["explanation"]
     assert "active experiment" in observed["explanation"]
+    expected_heading = gui_module._load_model_description(selected_model).splitlines()[0][2:]
+    assert expected_heading in observed["description"]
+    assert "Purpose" in observed["description"]
+    assert "Inheritance" in observed["description"]
     assert observed["position"] == observed["expected_position"]
     assert config["model"] == selected_model
     assert all(
@@ -869,3 +926,43 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
         for name, details in selected_metadata["settings"].items()
     )
     assert (experiment_dir / "multi.csv").is_file()
+
+
+@pytest.mark.smoke
+def test_gui_about_model_button_opens_modal_selected_description(gui_app):
+    """Show the current selector model in a modal read-only Markdown window."""
+    gui_app.root.deiconify()
+    selected_model = "model_base_fast_fixed_fecundity"
+    gui_app.model_var.set(selected_model)
+    observed = {}
+
+    def inspect_dialog():
+        """Capture the live About dialog and close it through its button."""
+        dialog = next(
+            child
+            for child in gui_app.root.winfo_children()
+            if isinstance(child, tk.Toplevel) and child.title().startswith("About Model:")
+        )
+        descendants = list(dialog.winfo_children())
+        markdown_view = next(
+            widget for widget in descendants if isinstance(widget, gui_module.LightweightMarkdownView)
+        )
+        close_button = next(
+            widget
+            for widget in descendants
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Close"
+        )
+        observed["title"] = dialog.title()
+        observed["grab"] = dialog.grab_current()
+        observed["description"] = markdown_view.text.get("1.0", "end-1c")
+        close_button.invoke()
+
+    gui_app.root.after(0, inspect_dialog)
+    gui_app._on_about_model()
+
+    assert observed["title"] == f"About Model: {selected_model}"
+    assert observed["grab"] is not None
+    assert "Fast beta model with fixed parent fecundity" in observed["description"]
+    assert gui_app.tooltips.get_text(gui_app.about_model_button) == (
+        "Show the selected model's purpose, inheritance, rules, and differences."
+    )

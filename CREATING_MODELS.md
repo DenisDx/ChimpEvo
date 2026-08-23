@@ -17,12 +17,18 @@ validates each declaration before the simulation starts.
 
 | Method | Required | Return value | Purpose |
 |---|---|---|---|
+| `description()` | Recommended | `str` | Describe the model for New Experiment and About Model. Override the placeholder inherited from `Model`. |
 | `add_settings()` | No | `dict` | Declare model settings. Each setting needs `description` and `default`; optional `type` is `int`, `float`, `str`, or `bool`, with optional numeric `min` and `max`. Merge `Model.add_settings()` when retaining inherited settings. |
 | `add_population_fields()` | No | `dict` | Declare ordered per-animal columns as `{name: {"public": bool}}`. The `age` field is inherited and is required by `age_population()`. Public fields may be used in distribution graphs. |
 | `add_values()` | No | `dict` | Declare scalar outputs returned by `get_values()`. Metadata can include `title`, `description`, `annual`, `final`, and `format`. Every declared value must be returned. |
 | `add_graphs()` | No | `list[dict]` | Declare annual/final graphs. A `time` graph references declared values; a `distr` graph references public population fields. Required keys are `filename` and `values`. |
 | `add_metagraphs()` | No | `list[dict]` | Declare aggregate graphs for batch runs. These reference declared values and optionally a declared setting or value through `xvalue`. |
 | `add_batch()` | No | `str` | Return default batch CSV text. Return `""` when the model has no default sweep. |
+
+`description()` supports a deliberately small Markdown subset: `#` and `##`
+headings, `-` lists, `**bold**`, inline code in backticks, and one-line formula
+blocks enclosed by `$$`. Include the model's purpose, parent model, and
+differences from that parent. Full Markdown and HTML are not rendered.
 
 ### Lifecycle Methods
 
@@ -81,6 +87,24 @@ from model import Model
 
 class Model_example(Model):
     """Provide an age-only custom model."""
+
+    @staticmethod
+    def description():
+        """Return the custom model description as lightweight Markdown."""
+        return """# Example age-only model
+
+## Purpose
+
+Provides a minimal starting point for custom population dynamics.
+
+## Inheritance
+
+Inherits from `Model`.
+
+## Difference from its parent
+
+Initializes every animal at the configured `starting_age`.
+"""
 
     @staticmethod
     def add_settings():

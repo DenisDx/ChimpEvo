@@ -8,6 +8,33 @@ from model_base import Model_base, mutation_interval
 class Model_base_fast(Model_base):
     """Provide the beta model with batched device-side reproduction."""
 
+    @staticmethod
+    def description():
+        """Return the optimized beta model description as lightweight Markdown."""
+        return """# Fast beta/Gompertz model
+
+## Purpose
+
+Runs the baseline beta/Gompertz population model with faster reproduction for
+large populations and CUDA workloads.
+
+## Inheritance
+
+Inherits all biological rules, settings, values, graphs, and stopping behavior
+from `Model_base`.
+
+## Difference from its parent
+
+- Selects all parent pairs in one Torch operation on the configured device.
+- Applies mutation and creates all offspring as one tensor batch.
+- Concatenates offspring to the population once per year instead of once per
+    birth.
+- Keeps the same unlimited per-parent annual participation as `Model_base`.
+
+The probability model is unchanged, but exact seeded trajectories can differ
+because reproduction uses Torch random draws instead of Python and NumPy draws.
+"""
+
     def apply_reproduction(self):
         """Create a batch of offspring up to fecundity and population limits."""
         self.last_born = 0

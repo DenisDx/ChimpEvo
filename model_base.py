@@ -19,6 +19,48 @@ class Model_base(Model):
     """Provide the current beta model through the dynamic-model naming contract."""
 
     @staticmethod
+    def description():
+        """Return the beta/Gompertz model description as lightweight Markdown."""
+        return """# Baseline beta/Gompertz model
+
+## Purpose
+
+Simulates year-by-year evolution of an age-structured population whose inherited
+`beta` value controls age-dependent mortality. It is the simplest complete
+biological model bundled with ChimpEvo.
+
+## Inheritance
+
+Inherits the generic population lifecycle from `Model`.
+
+## Difference from its parent
+
+- Adds a public `beta` field to every animal.
+- Adds stochastic mortality, sexual-maturity-based reproduction, inheritance,
+    mutation, carrying capacity, and beta-stabilization stopping.
+- Selects mature parents with replacement, so one animal may participate in any
+    number of births during the same year.
+
+## Core rules
+
+Annual mortality at age `t` is clamped to a valid probability:
+
+$$m(t, beta) = clamp(alpha * exp(beta * t) + Lambda, 0, 1)$$
+
+Without mutation, offspring inherit the parental mean:
+
+$$beta_child = (beta_parent1 + beta_parent2) / 2$$
+
+With probability `mutation_probability`, an additive shift is sampled:
+
+$$delta_beta ~ Uniform(-X + S*X, X + S*X)$$
+
+and `beta_child = parental_mean + delta_beta`. Each year runs reproduction,
+aging, and mortality in that order. Births are limited by mature population,
+`fecundity`, and `max_population`.
+"""
+
+    @staticmethod
     def add_settings():
         """Declare inherited and beta-model biological settings."""
         return {

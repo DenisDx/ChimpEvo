@@ -607,13 +607,20 @@ class PopulationSimulation:
         
         return True
 
-    def run(self, should_cancel=None, should_finalize=None, graph_callback=None):
-        """Run until completion and report each generated graph frame."""
+    def run(
+        self,
+        should_cancel=None,
+        should_finalize=None,
+        graph_callback=None,
+        performance_callback=None,
+    ):
+        """Run until completion and report generated graphs and performance snapshots."""
         log(f"Starting simulation: {self.settings['tag']}")
         self._log_startup_info()
         self.start_time = time.perf_counter()
         self.was_cancelled = False
         reported_graph_year = None
+        next_performance_report = self.start_time
 
         while True:
             if should_cancel is not None and should_cancel():
@@ -621,6 +628,14 @@ class PopulationSimulation:
                 log("Stop: cancellation requested")
                 break
             has_next = self.step(should_finalize=should_finalize)
+            current_time = time.perf_counter()
+            if performance_callback is not None and current_time >= next_performance_report:
+                performance_callback(
+                    current_time - self.start_time,
+                    self.year,
+                    self.total_animals_processed,
+                )
+                next_performance_report = current_time + 0.1
             if (
                 graph_callback is not None
                 and self.last_generated_graph_year != reported_graph_year
@@ -629,6 +644,13 @@ class PopulationSimulation:
                 reported_graph_year = self.last_generated_graph_year
             if not has_next:
                 break
+
+        if performance_callback is not None:
+            performance_callback(
+                time.perf_counter() - self.start_time,
+                self.year,
+                self.total_animals_processed,
+            )
 
         # Generate graph for final year if not already generated
         if self.results:
@@ -803,6 +825,7 @@ def run_simulation(
     should_finalize=None,
     return_completion=False,
     graph_callback=None,
+    performance_callback=None,
     result_root="result",
 ):
     """Main entry point for simulation from command line or batch
@@ -813,6 +836,7 @@ def run_simulation(
         should_finalize: optional callback requesting successful completion
         return_completion: include successful-completion status in the return value
         graph_callback: optional callback receiving output directory and generated year
+        performance_callback: optional callback receiving elapsed seconds, years, and processed animals
         result_root: directory containing tag-specific result folders
         
     Returns:
@@ -831,6 +855,7 @@ def run_simulation(
         should_cancel=should_cancel,
         should_finalize=should_finalize,
         graph_callback=graph_callback,
+        performance_callback=performance_callback,
     )
     
     # Export results

@@ -9,6 +9,26 @@ import torch
 class Model:
     """Provide shared age-based behavior for dynamic population models."""
 
+    @staticmethod
+    def description():
+        """Return the model description as lightweight Markdown."""
+        return """# Custom population model
+
+## Purpose
+
+Replace this text with a description of your model by overriding the static
+`description()` method.
+
+## Inheritance
+
+This placeholder is defined by the generic `Model` lifecycle.
+
+## Difference from its parent
+
+Describe the biological rules, settings, outputs, and behavior that your model
+adds or changes.
+"""
+
     def __init__(self, settings, device):
         """Store settings, device, population schema, and annual counters."""
         self.settings = settings

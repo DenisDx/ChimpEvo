@@ -7,6 +7,7 @@ import json
 import csv
 import io
 import os
+import re
 import subprocess
 import sys
 import threading
@@ -14,6 +15,7 @@ import time
 import queue
 from pathlib import Path
 import tkinter as tk
+import tkinter.font as tkfont
 from tkinter import ttk, messagebox, filedialog
 import torch
 from PIL import Image, ImageTk
@@ -37,6 +39,7 @@ BUTTON_TOOLTIPS = {
     "Delete Experiment": "Delete the active experiment and all of its stored data.",
     "Open In File Explorer": "Open the selected experiment directory in the system file manager.",
     "Load Model": "Load the selected model and its declared settings.",
+    "About Model...": "Show the selected model's purpose, inheritance, rules, and differences.",
     "Load All Model Defaults": "Reset configuration and batch values to the active model defaults.",
     "Start Simulation": "Start one simulation with the current saved configuration.",
     "Stop": "Cancel the active single simulation and keep partial results.",
@@ -62,6 +65,8 @@ BUTTON_TOOLTIPS = {
     "Yes": "Confirm the requested action.",
     "Close": "Close this window.",
 }
+
+INLINE_MARKDOWN_PATTERN = re.compile(r"(\*\*[^*\n]+\*\*|`[^`\n]+`)")
 
 
 class TooltipManager:
@@ -155,6 +160,171 @@ class TooltipManager:
                 pass
             self._tooltip = None
         self._widget = None
+
+
+class LightweightMarkdownView(ttk.Frame):
+    """Render a small documented Markdown subset in a read-only Tk text view."""
+
+    def __init__(self, parent, height=16):
+        """Create a scrollable Markdown text view."""
+        super().__init__(parent)
+        self.text = tk.Text(
+            self,
+            height=height,
+            wrap=tk.WORD,
+            state=tk.DISABLED,
+            padx=14,
+            pady=12,
+            relief=tk.FLAT,
+            borderwidth=0,
+            cursor="arrow",
+        )
+        scrollbar = ttk.Scrollbar(self, orient=tk.VERTICAL, command=self.text.yview)
+        self.text.configure(yscrollcommand=scrollbar.set)
+        self.text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self._configure_tags()
+
+    def _configure_tags(self):
+        """Configure visual styles for the supported Markdown elements."""
+        default_font = tkfont.nametofont("TkDefaultFont")
+        fixed_font = tkfont.nametofont("TkFixedFont")
+        family = default_font.actual("family")
+        size = int(default_font.actual("size"))
+        self._fonts = {
+            "heading1": tkfont.Font(family=family, size=size + 5, weight="bold"),
+            "heading2": tkfont.Font(family=family, size=size + 2, weight="bold"),
+            "bold": tkfont.Font(family=family, size=size, weight="bold"),
+            "formula": tkfont.Font(
+                family=fixed_font.actual("family"),
+                size=int(fixed_font.actual("size")) + 1,
+            ),
+        }
+        self.text.tag_configure(
+            "heading1",
+            font=self._fonts["heading1"],
+            foreground="#18324a",
+            spacing1=4,
+            spacing3=10,
+        )
+        self.text.tag_configure(
+            "heading2",
+            font=self._fonts["heading2"],
+            foreground="#28536f",
+            spacing1=8,
+            spacing3=5,
+        )
+        self.text.tag_configure(
+            "bold",
+            font=self._fonts["bold"],
+        )
+        self.text.tag_configure(
+            "code",
+            font=fixed_font,
+            background="#eef2f4",
+            foreground="#243746",
+        )
+        self.text.tag_configure(
+            "formula",
+            font=self._fonts["formula"],
+            background="#f2f6f8",
+            foreground="#17384d",
+            lmargin1=18,
+            lmargin2=18,
+            rmargin=18,
+            spacing1=6,
+            spacing3=8,
+        )
+        self.text.tag_configure(
+            "bullet",
+            lmargin1=16,
+            lmargin2=32,
+            spacing1=2,
+            spacing3=2,
+        )
+        self.text.tag_configure("paragraph", spacing3=7)
+
+    def _insert_inline(self, text, block_tag):
+        """Insert bold and code spans while preserving the block style."""
+        position = 0
+        for match in INLINE_MARKDOWN_PATTERN.finditer(text):
+            if match.start() > position:
+                self.text.insert(tk.END, text[position:match.start()], (block_tag,))
+            token = match.group(0)
+            inline_tag = "bold" if token.startswith("**") else "code"
+            marker_width = 2 if inline_tag == "bold" else 1
+            self.text.insert(
+                tk.END,
+                token[marker_width:-marker_width],
+                (block_tag, inline_tag),
+            )
+            position = match.end()
+        if position < len(text):
+            self.text.insert(tk.END, text[position:], (block_tag,))
+
+    def set_markdown(self, markdown_text):
+        """Replace the view with rendered lightweight Markdown text."""
+        self.text.configure(state=tk.NORMAL)
+        self.text.delete("1.0", tk.END)
+        lines = markdown_text.strip().splitlines()
+        index = 0
+        while index < len(lines):
+            stripped = lines[index].strip()
+            if not stripped:
+                index += 1
+                continue
+            if stripped.startswith("# "):
+                self._insert_inline(stripped[2:], "heading1")
+                self.text.insert(tk.END, "\n", ("heading1",))
+                index += 1
+                continue
+            if stripped.startswith("## "):
+                self._insert_inline(stripped[3:], "heading2")
+                self.text.insert(tk.END, "\n", ("heading2",))
+                index += 1
+                continue
+            if stripped.startswith("$$") and stripped.endswith("$$"):
+                self.text.insert(tk.END, stripped[2:-2].strip() + "\n", ("formula",))
+                index += 1
+                continue
+            if stripped.startswith("- "):
+                bullet_parts = [stripped[2:]]
+                index += 1
+                while index < len(lines) and lines[index].startswith("  "):
+                    bullet_parts.append(lines[index].strip())
+                    index += 1
+                self.text.insert(tk.END, "\N{BULLET} ", ("bullet",))
+                self._insert_inline(" ".join(bullet_parts), "bullet")
+                self.text.insert(tk.END, "\n", ("bullet",))
+                continue
+
+            paragraph_parts = [stripped]
+            index += 1
+            while index < len(lines):
+                next_line = lines[index].strip()
+                if (
+                    not next_line
+                    or next_line.startswith("# ")
+                    or next_line.startswith("## ")
+                    or next_line.startswith("- ")
+                    or (next_line.startswith("$$") and next_line.endswith("$$"))
+                ):
+                    break
+                paragraph_parts.append(next_line)
+                index += 1
+            self._insert_inline(" ".join(paragraph_parts), "paragraph")
+            self.text.insert(tk.END, "\n", ("paragraph",))
+        self.text.configure(state=tk.DISABLED)
+        self.text.yview_moveto(0.0)
+
+
+def _load_model_description(model_name):
+    """Load and validate one model's lightweight Markdown description."""
+    model_class = load_model_class(model_name)
+    description = model_class.description()
+    if not isinstance(description, str) or not description.strip():
+        raise ModelLoadError(f"{model_class.__name__}.description() must return non-empty text")
+    return description
 
 
 def _normalize_model_setting(value, metadata):
@@ -467,6 +637,12 @@ class SimulationGUI:
         self.model_selector.bind("<<ComboboxSelected>>", self._on_model_selected)
         self.model_var.trace_add("write", self._mark_config_dirty)
         ttk.Button(model_frame, text="Load Model", command=self._on_model_selected).pack(side=tk.LEFT, padx=5)
+        self.about_model_button = ttk.Button(
+            model_frame,
+            text="About Model...",
+            command=self._on_about_model,
+        )
+        self.about_model_button.pack(side=tk.LEFT, padx=5)
         ttk.Button(
             model_frame,
             text="Load All Model Defaults",
@@ -606,8 +782,8 @@ class SimulationGUI:
         """Show the new-experiment form and return its created directory or None."""
         dialog = tk.Toplevel(self.root)
         dialog.title("New Experiment")
-        dialog.geometry("560x280")
-        dialog.minsize(520, 260)
+        dialog.geometry("700x600")
+        dialog.minsize(620, 480)
         dialog.transient(self.root)
         dialog.columnconfigure(1, weight=1)
         dialog.rowconfigure(3, weight=1)
@@ -663,6 +839,30 @@ class SimulationGUI:
         )
         model_selector.grid(row=2, column=1, sticky="ew", padx=(0, 20), pady=10)
 
+        description_frame = ttk.LabelFrame(dialog, text="Model description", padding=6)
+        description_frame.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky="nsew",
+            padx=20,
+            pady=(4, 8),
+        )
+        description_view = LightweightMarkdownView(description_frame, height=14)
+        description_view.pack(fill=tk.BOTH, expand=True)
+
+        def update_description(event=None):
+            """Render the currently selected model description in the form."""
+            model_name = model_name_var.get().strip()
+            try:
+                description = _load_model_description(model_name)
+            except (ModelLoadError, ValueError) as error:
+                description = f"# Description unavailable\n\n{error}"
+            description_view.set_markdown(description)
+
+        model_selector.bind("<<ComboboxSelected>>", update_description)
+        update_description()
+
         result = []
 
         def cancel():
@@ -684,7 +884,7 @@ class SimulationGUI:
 
         buttons = ttk.Frame(dialog)
         buttons.grid(
-            row=3,
+            row=4,
             column=0,
             columnspan=2,
             sticky=tk.SE,
@@ -709,6 +909,33 @@ class SimulationGUI:
         dialog.grab_set()
         self.root.wait_window(dialog)
         return result[0] if result else None
+
+    def _on_about_model(self):
+        """Show a modal description of the model named in the main selector."""
+        model_name = self.model_var.get().strip()
+        try:
+            description = _load_model_description(model_name)
+        except (ModelLoadError, ValueError) as error:
+            messagebox.showerror("Model error", f"Could not load model description: {error}")
+            return
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title(f"About Model: {model_name}")
+        dialog.geometry("700x560")
+        dialog.minsize(520, 400)
+        dialog.transient(self.root)
+        description_view = LightweightMarkdownView(dialog, height=20)
+        description_view.pack(fill=tk.BOTH, expand=True, padx=12, pady=(12, 6))
+        description_view.set_markdown(description)
+        ttk.Button(dialog, text="Close", command=dialog.destroy).pack(
+            anchor=tk.E,
+            padx=12,
+            pady=(6, 12),
+        )
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        dialog.grab_set()
+        self.root.wait_window(dialog)
 
     def _on_new_experiment(self):
         """Create a new experiment and switch the GUI to it."""
@@ -1336,6 +1563,7 @@ class SimulationGUI:
         self.batch_failed = False
         self.batch_selected_tag = selected_tag
         self.batch_status_var.set("Starting batch")
+        self._display_performance_stats(0.0, 0, 0)
         self.batch_start_button.config(state=tk.DISABLED)
         self.batch_stop_button.config(state=tk.NORMAL)
         self.progress_stop_btn.config(state=tk.NORMAL)
@@ -1358,6 +1586,17 @@ class SimulationGUI:
             if not self.is_closing:
                 self.root.after(0, self._show_batch_graphs)
 
+        def report_performance(elapsed, years, total_animals):
+            """Schedule one batch performance snapshot on the Tk event loop."""
+            if not self.is_closing:
+                self.root.after(
+                    0,
+                    self._display_performance_stats,
+                    elapsed,
+                    years,
+                    total_animals,
+                )
+
         try:
             run_batch(
                 self.batch_path,
@@ -1366,6 +1605,7 @@ class SimulationGUI:
                 should_finalize=self._consume_finalize_request,
                 progress_callback=report_progress,
                 graph_callback=report_graph,
+                performance_callback=report_performance,
                 selected_tag=self.batch_selected_tag,
             )
         except Exception as error:
@@ -2194,19 +2434,24 @@ class SimulationGUI:
         """Update performance statistics display from current simulation state"""
         if not self.simulation or not self.simulation.start_time:
             return
-        
+
         elapsed_sec = time.perf_counter() - self.simulation.start_time
-        year = self.simulation.year
-        total_animals = self.simulation.total_animals_processed
-        
+        self._display_performance_stats(
+            elapsed_sec,
+            self.simulation.year,
+            self.simulation.total_animals_processed,
+        )
+
+    def _display_performance_stats(self, elapsed_sec, year, total_animals):
+        """Display one simulation or batch performance snapshot."""
         # Elapsed time
         self.stat_elapsed_time.config(text=f"{elapsed_sec:.3f} s")
-        
+
         # Average iteration time
         if year > 0:
             avg_iteration = elapsed_sec / year
             self.stat_avg_iteration.config(text=f"{avg_iteration:.6f} s")
-            
+
             # Average per-element time in microseconds
             if total_animals > 0:
                 avg_per_element_sec = elapsed_sec / total_animals

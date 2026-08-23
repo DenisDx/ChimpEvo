@@ -112,6 +112,31 @@ def test_run_reports_each_generated_graph_frame(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_run_simulation_reports_final_performance_snapshot(tmp_path):
+    """Report elapsed time, completed years, and processed animals to callers."""
+    snapshots = []
+    cancel_requested = False
+
+    def record_snapshot(elapsed, years, animals):
+        """Record one snapshot and stop after the first completed year."""
+        nonlocal cancel_requested
+        snapshots.append((elapsed, years, animals))
+        cancel_requested = years > 0
+
+    run_simulation(
+        make_settings(tag="performance_snapshot"),
+        should_cancel=lambda: cancel_requested,
+        performance_callback=record_snapshot,
+        result_root=tmp_path,
+    )
+
+    elapsed, years, animals = snapshots[-1]
+    assert elapsed > 0
+    assert years > 0
+    assert animals > 0
+
+
+@pytest.mark.smoke
 def test_population_below_two_stops_after_completed_year(tmp_path, monkeypatch):
     """Stop the current v1 simulation when fewer than two animals remain."""
     monkeypatch.chdir(tmp_path)
