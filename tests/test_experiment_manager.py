@@ -4,6 +4,7 @@ import subprocess
 import sys
 
 import pytest
+import experiment_manager as experiment_manager_module
 
 from experiment_manager import (
     ExperimentManager,
@@ -55,6 +56,84 @@ def test_experiment_manager_creates_complete_experiment_before_selection(tmp_pat
     assert json.loads((experiment_dir / "config.json").read_text(encoding="utf-8"))["model"] == "model_base"
     assert (experiment_dir / "multi.csv").read_text(encoding="utf-8") == "tag\nrun_a\n"
     assert manager.get_active_experiment_name() == "exp_alpha"
+
+
+def test_experiment_manager_clones_saved_files_and_optional_results_byte_for_byte(tmp_path):
+    """Copy exact saved bytes and current results without copying result archives."""
+    manager = ExperimentManager(tmp_path)
+    source_dir = tmp_path / "data" / "source"
+    source_dir.mkdir(parents=True)
+    config_bytes = b'{\r\n  "model": "model_base",\r\n  "tag": "source"\r\n}'
+    batch_bytes = b"tag,mutation_x\r\nfirst,0.5\r\n"
+    (source_dir / "config.json").write_bytes(config_bytes)
+    (source_dir / "multi.csv").write_bytes(batch_bytes)
+    (source_dir / "result" / "first").mkdir(parents=True)
+    result_bytes = b"year,count\r\n1,100\r\n"
+    (source_dir / "result" / "first" / "result.csv").write_bytes(result_bytes)
+    archive_dir = source_dir / "result_20260823_120000_000000.bak"
+    archive_dir.mkdir()
+    (archive_dir / "old.csv").write_bytes(b"old")
+
+    clone_dir = manager.clone_experiment(
+        "source",
+        "clone_with_results",
+        copy_results=True,
+    )
+
+    assert (clone_dir / "config.json").read_bytes() == config_bytes
+    assert (clone_dir / "multi.csv").read_bytes() == batch_bytes
+    assert (clone_dir / "result" / "first" / "result.csv").read_bytes() == result_bytes
+    assert not (clone_dir / archive_dir.name).exists()
+    assert manager.get_active_experiment_name() == "clone_with_results"
+
+
+def test_experiment_manager_clone_can_omit_results_and_activation(tmp_path):
+    """Create an inactive clone containing only saved config and optional batch files."""
+    manager = ExperimentManager(tmp_path)
+    source_dir = manager.create_experiment(
+        "source",
+        {"model": "model_base"},
+        activate=True,
+    )
+    (source_dir / "result").mkdir()
+    (source_dir / "result" / "result.csv").write_text("saved", encoding="utf-8")
+
+    clone_dir = manager.clone_experiment(
+        "source",
+        "clone_without_results",
+        copy_results=False,
+        activate=False,
+    )
+
+    assert (clone_dir / "config.json").read_bytes() == (source_dir / "config.json").read_bytes()
+    assert not (clone_dir / "multi.csv").exists()
+    assert not (clone_dir / "result").exists()
+    assert manager.get_active_experiment_name() == "source"
+
+
+def test_experiment_manager_clone_validates_target_and_rolls_back_copy_failure(
+    tmp_path,
+    monkeypatch,
+):
+    """Reject unsafe or occupied targets and remove a partial clone after copy errors."""
+    manager = ExperimentManager(tmp_path)
+    source_dir = manager.create_experiment("source", {"model": "model_base"})
+    (source_dir / "result").mkdir()
+    manager.create_experiment("occupied", {"model": "model_base"}, activate=False)
+
+    with pytest.raises(ValueError, match="portable path name"):
+        manager.clone_experiment("source", "bad/name")
+    with pytest.raises(ValueError, match="already exists"):
+        manager.clone_experiment("source", "occupied")
+
+    def fail_copytree(source, target):
+        """Simulate a result-tree copy failure after config was copied."""
+        raise OSError("copy failed")
+
+    monkeypatch.setattr(experiment_manager_module.shutil, "copytree", fail_copytree)
+    with pytest.raises(OSError, match="copy failed"):
+        manager.clone_experiment("source", "failed_clone", copy_results=True)
+    assert not (tmp_path / "data" / "failed_clone").exists()
 
 
 def test_experiment_manager_deletes_experiment_and_clears_active_selector(tmp_path):

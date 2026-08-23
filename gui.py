@@ -36,6 +36,7 @@ CORE_SETTING_NAMES = (
 
 BUTTON_TOOLTIPS = {
     "New Experiment": "Create an experiment from the selected model defaults.",
+    "Clone...": "Clone the active experiment's saved configuration and optional results.",
     "Delete Experiment": "Delete the active experiment and all of its stored data.",
     "Open In File Explorer": "Open the selected experiment directory in the system file manager.",
     "Load Model": "Load the selected model and its declared settings.",
@@ -542,6 +543,12 @@ class SimulationGUI:
             text="New Experiment",
             command=self._on_new_experiment,
         ).pack(side=tk.LEFT, padx=5)
+        self.clone_experiment_button = ttk.Button(
+            experiment_frame,
+            text="Clone...",
+            command=self._on_clone_experiment,
+        )
+        self.clone_experiment_button.pack(side=tk.LEFT, padx=5)
         ttk.Button(
             experiment_frame,
             text="Delete Experiment",
@@ -954,6 +961,135 @@ class SimulationGUI:
         self.experiment_selector.configure(values=self.experiment_manager.list_experiments())
         self.experiment_var.set(experiment_dir.name)
         self._activate_experiment(experiment_dir.name)
+
+    def _prompt_clone_experiment(self, source_name):
+        """Show the clone form and return its new experiment directory or None."""
+        source_dir = (
+            self.experiment_manager.project_root
+            / self.experiment_manager.data_dir_name
+            / source_name
+        )
+        result_dir = source_dir / "result"
+        has_results = result_dir.is_dir() and any(result_dir.iterdir())
+
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Clone Experiment")
+        dialog.geometry("480x190")
+        dialog.minsize(440, 170)
+        dialog.transient(self.root)
+        dialog.columnconfigure(1, weight=1)
+
+        ttk.Label(dialog, text=f"Clone experiment: {source_name}").grid(
+            row=0,
+            column=0,
+            columnspan=2,
+            sticky=tk.W,
+            padx=20,
+            pady=(20, 8),
+        )
+        ttk.Label(dialog, text="New experiment name:").grid(
+            row=1,
+            column=0,
+            sticky=tk.W,
+            padx=(20, 10),
+            pady=8,
+        )
+        experiment_name_var = tk.StringVar()
+        name_entry = ttk.Entry(dialog, textvariable=experiment_name_var)
+        name_entry.grid(row=1, column=1, sticky="ew", padx=(0, 20), pady=8)
+
+        copy_results_var = tk.BooleanVar(value=False)
+        copy_results_check = ttk.Checkbutton(
+            dialog,
+            text="Copy results",
+            variable=copy_results_var,
+            state=tk.NORMAL if has_results else tk.DISABLED,
+        )
+        copy_results_check.grid(
+            row=2,
+            column=1,
+            sticky=tk.W,
+            padx=(0, 20),
+            pady=8,
+        )
+
+        result = []
+
+        def cancel():
+            """Close the dialog without cloning the experiment."""
+            dialog.destroy()
+
+        def clone():
+            """Validate the form and close after a successful clone."""
+            try:
+                experiment_dir = self.experiment_manager.clone_experiment(
+                    source_name,
+                    experiment_name_var.get().strip(),
+                    copy_results=copy_results_var.get(),
+                    activate=False,
+                )
+            except (OSError, ValueError) as error:
+                messagebox.showerror("Clone Experiment", str(error), parent=dialog)
+                return
+            result.append(experiment_dir)
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(
+            row=3,
+            column=0,
+            columnspan=2,
+            sticky=tk.SE,
+            padx=20,
+            pady=(12, 16),
+        )
+        ttk.Button(buttons, text="OK", command=clone).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="Cancel", command=cancel).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", cancel)
+        dialog.bind("<Return>", lambda event: clone())
+        dialog.bind("<Escape>", lambda event: cancel())
+        name_entry.focus_set()
+        self.root.update_idletasks()
+        dialog.update_idletasks()
+        dialog_x = self.root.winfo_rootx() + (
+            self.root.winfo_width() - dialog.winfo_width()
+        ) // 2
+        dialog_y = self.root.winfo_rooty() + (
+            self.root.winfo_height() - dialog.winfo_height()
+        ) // 2
+        dialog.geometry(f"+{max(0, dialog_x)}+{max(0, dialog_y)}")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return result[0] if result else None
+
+    def _on_clone_experiment(self):
+        """Clone the active experiment and switch the GUI to the completed copy."""
+        source_name = self.experiment_manager.get_active_experiment_name()
+        if not source_name:
+            messagebox.showwarning("Clone Experiment", "No active experiment is selected.")
+            return
+        if self.is_running or self.is_batch_running:
+            messagebox.showwarning(
+                "Experiment busy",
+                "Stop the active calculation before cloning an experiment.",
+            )
+            return
+        if not self._confirm_experiment_transition():
+            return
+        try:
+            experiment_dir = self._prompt_clone_experiment(source_name)
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Clone Experiment", str(error))
+            return
+        if experiment_dir is None:
+            return
+        self.experiment_selector.configure(values=self.experiment_manager.list_experiments())
+        self.experiment_var.set(experiment_dir.name)
+        try:
+            self._activate_experiment(experiment_dir.name)
+        except (ModelLoadError, OSError, ValueError) as error:
+            self.experiment_var.set(source_name)
+            messagebox.showerror("Clone Experiment", f"Could not activate clone: {error}")
 
     def _on_delete_experiment(self):
         """Confirm and delete the active experiment, then select or create a replacement."""

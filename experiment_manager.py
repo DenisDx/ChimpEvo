@@ -111,6 +111,42 @@ class ExperimentManager:
             raise
         return experiment_dir
 
+    def clone_experiment(
+        self,
+        source_name,
+        target_name,
+        copy_results=False,
+        activate=True,
+    ):
+        """Clone saved experiment files and optionally current results byte for byte."""
+        self.validate_experiment_name(source_name)
+        self.validate_experiment_name(target_name)
+        data_dir = self.project_root / self.data_dir_name
+        source_dir = data_dir / source_name
+        target_dir = data_dir / target_name
+        source_config = source_dir / "config.json"
+        if not source_dir.is_dir() or not source_config.is_file():
+            raise ValueError(f"Source experiment is invalid: {source_name}")
+        if target_dir.exists():
+            raise ValueError(f"Experiment already exists: {target_name}")
+
+        try:
+            target_dir.mkdir(parents=True)
+            shutil.copy2(source_config, target_dir / "config.json")
+            source_batch = source_dir / "multi.csv"
+            if source_batch.is_file():
+                shutil.copy2(source_batch, target_dir / "multi.csv")
+            source_results = source_dir / "result"
+            if copy_results and source_results.is_dir():
+                shutil.copytree(source_results, target_dir / "result")
+            if activate:
+                self.set_active_experiment(target_name)
+        except Exception:
+            if target_dir.exists():
+                shutil.rmtree(target_dir)
+            raise
+        return target_dir
+
     def delete_experiment(self, experiment_name):
         """Delete one existing experiment and clear its active selector when needed."""
         self.validate_experiment_name(experiment_name)

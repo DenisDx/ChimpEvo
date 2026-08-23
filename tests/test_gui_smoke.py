@@ -160,6 +160,32 @@ def test_gui_cancels_new_experiment_when_dirty_transition_is_cancelled(gui_app, 
 
 
 @pytest.mark.smoke
+def test_gui_does_not_prompt_for_clone_when_busy_or_dirty_transition_is_cancelled(
+    gui_app,
+    monkeypatch,
+):
+    """Keep clone unavailable during calculations and after cancelling dirty resolution."""
+    gui_app._create_experiment("source", "model_base")
+    gui_app._activate_experiment("source")
+    prompts = []
+    gui_app.is_config_dirty = True
+    monkeypatch.setattr(gui_module.messagebox, "askyesnocancel", lambda *args: None)
+    monkeypatch.setattr(
+        gui_app,
+        "_prompt_clone_experiment",
+        lambda source_name: prompts.append(source_name),
+    )
+
+    gui_app._on_clone_experiment()
+    gui_app.is_config_dirty = False
+    gui_app.is_running = True
+    monkeypatch.setattr(gui_module.messagebox, "showwarning", lambda *args: None)
+    gui_app._on_clone_experiment()
+
+    assert prompts == []
+
+
+@pytest.mark.smoke
 def test_gui_constructs_and_updates_valid_settings(gui_app):
     """Construct the GUI and transfer valid controls into memory."""
     gui_app.model_setting_rows["max_population"]["value"].set("500")
@@ -851,6 +877,129 @@ def test_gui_opens_selected_experiment_in_platform_file_manager(gui_app, monkeyp
     assert gui_app.tooltips.get_text(gui_app.open_experiment_dir_button) == (
         "Open the selected experiment directory in the system file manager."
     )
+
+
+@pytest.mark.smoke
+def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app):
+    """Clone exact saved files and selected results, then activate the completed copy."""
+    gui_app._create_experiment("source", "model_base")
+    gui_app._activate_experiment("source")
+    gui_app.root.deiconify()
+    gui_app.root.update_idletasks()
+    source_name = gui_app.experiment_manager.get_active_experiment_name()
+    source_dir = gui_app.experiment_dir
+    config_bytes = Path(gui_app.config_file).read_bytes()
+    batch_bytes = gui_app.batch_path.read_bytes() if gui_app.batch_path.exists() else None
+    result_file = source_dir / "result" / "run_a" / "result.csv"
+    result_file.parent.mkdir(parents=True)
+    result_file.write_bytes(b"year,count\r\n1,100\r\n")
+    archive_dir = source_dir / "result_20260823_120000_000000.bak"
+    archive_dir.mkdir()
+    (archive_dir / "old.csv").write_bytes(b"old")
+    observed = {}
+
+    def descendants(widget):
+        """Return every nested Tk child below one widget."""
+        children = list(widget.winfo_children())
+        return children + [nested for child in children for nested in descendants(child)]
+
+    def complete_dialog():
+        """Select result copying and submit the live clone form."""
+        dialog = next(
+            child
+            for child in gui_app.root.winfo_children()
+            if isinstance(child, tk.Toplevel) and child.title() == "Clone Experiment"
+        )
+        widgets = descendants(dialog)
+        name_entry = next(widget for widget in widgets if widget.winfo_class() == "TEntry")
+        copy_check = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TCheckbutton" and widget.cget("text") == "Copy results"
+        )
+        ok_button = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "OK"
+        )
+        observed["state"] = str(copy_check.cget("state"))
+        observed["selected_before"] = copy_check.instate(["selected"])
+        observed["grab"] = dialog.grab_current()
+        name_entry.insert(0, "cloned_experiment")
+        copy_check.invoke()
+        ok_button.invoke()
+
+    gui_app.root.after(0, complete_dialog)
+    gui_app._on_clone_experiment()
+
+    clone_dir = source_dir.parent / "cloned_experiment"
+    assert observed["state"] == "normal"
+    assert observed["selected_before"] is False
+    assert observed["grab"] is not None
+    assert (clone_dir / "config.json").read_bytes() == config_bytes
+    if batch_bytes is not None:
+        assert (clone_dir / "multi.csv").read_bytes() == batch_bytes
+    assert (clone_dir / "result" / "run_a" / "result.csv").read_bytes() == result_file.read_bytes()
+    assert not (clone_dir / archive_dir.name).exists()
+    assert gui_app.experiment_manager.get_active_experiment_name() == "cloned_experiment"
+    assert gui_app.experiment_var.get() == "cloned_experiment"
+    assert gui_app.experiment_dir == clone_dir
+    assert Path(gui_app.config_file) == clone_dir / "config.json"
+    assert source_name != "cloned_experiment"
+
+    siblings = gui_app.clone_experiment_button.master.pack_slaves()
+    clone_index = siblings.index(gui_app.clone_experiment_button)
+    assert siblings[clone_index - 1].cget("text") == "New Experiment"
+    assert siblings[clone_index + 1].cget("text") == "Delete Experiment"
+    assert gui_app.tooltips.get_text(gui_app.clone_experiment_button) == (
+        "Clone the active experiment's saved configuration and optional results."
+    )
+
+
+@pytest.mark.smoke
+def test_gui_clone_dialog_disables_result_copy_without_results(gui_app):
+    """Keep Copy results unchecked and disabled for an empty result directory."""
+    gui_app._create_experiment("source", "model_base")
+    gui_app._activate_experiment("source")
+    gui_app.root.deiconify()
+    result_dir = gui_app.experiment_dir / "result"
+    result_dir.mkdir(exist_ok=True)
+    observed = {}
+
+    def descendants(widget):
+        """Return every nested Tk child below one widget."""
+        children = list(widget.winfo_children())
+        return children + [nested for child in children for nested in descendants(child)]
+
+    def cancel_dialog():
+        """Inspect and cancel the live clone form."""
+        dialog = next(
+            child
+            for child in gui_app.root.winfo_children()
+            if isinstance(child, tk.Toplevel) and child.title() == "Clone Experiment"
+        )
+        widgets = descendants(dialog)
+        copy_check = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TCheckbutton" and widget.cget("text") == "Copy results"
+        )
+        cancel_button = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Cancel"
+        )
+        observed["state"] = str(copy_check.cget("state"))
+        observed["selected"] = copy_check.instate(["selected"])
+        cancel_button.invoke()
+
+    gui_app.root.after(0, cancel_dialog)
+    clone_dir = gui_app._prompt_clone_experiment(
+        gui_app.experiment_manager.get_active_experiment_name(),
+    )
+
+    assert clone_dir is None
+    assert observed == {"state": "disabled", "selected": False}
 
 
 @pytest.mark.smoke

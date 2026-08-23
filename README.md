@@ -141,7 +141,7 @@ python gui.py
 ```
 
 Opens a window where you can:
-- Create, switch, and confirm deletion of experiments stored under `data/<experiment>/`
+- Create, clone, switch, and confirm deletion of experiments stored under `data/<experiment>/`. Cloning copies the saved `config.json` and optional `multi.csv` byte for byte, can optionally copy the current non-empty `result/` directory, excludes result backup archives, and activates the completed clone.
 - Edit all simulation parameters with real-time validation (organized in Settings tab)
 - Select CPU or CUDA accelerated computation
 - Start/stop simulations (automatically opens the non-modal Progress window on start)
