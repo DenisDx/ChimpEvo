@@ -12,6 +12,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from main import run_simulation, log, validate_runtime_config
 from experiment_manager import ExperimentNotSelectedError, archive_path, resolve_experiment_paths
+from graph_style import render_series
 from load_model import load_model_class
 from metadata import validate_model_metadata
 from settings import DEFAULT_SETTINGS
@@ -23,6 +24,23 @@ class BatchValidationError(ValueError):
 
 class BatchExecutionError(RuntimeError):
     """Report one or more batch rows that failed during execution."""
+
+
+def find_duplicate_variant_tags(fieldnames, variants):
+    """Return tag groups whose raw non-tag CSV values are identical."""
+    grouped_tags = {}
+    for row in variants:
+        configuration = tuple(
+            (name, row.get(name, "")) for name in fieldnames if name != "tag"
+        )
+        grouped_tags.setdefault(configuration, []).append(row.get("tag", "").strip())
+    return [tags for tags in grouped_tags.values() if len(tags) > 1]
+
+
+def format_duplicate_variant_warning(duplicate_tag_groups):
+    """Return a readable warning listing duplicate batch-row tags."""
+    groups = [", ".join(tags) for tags in duplicate_tag_groups]
+    return "Identical batch parameter rows found for tags: " + "; ".join(groups)
 
 
 def _load_variants(csv_path, base_config):
@@ -42,12 +60,9 @@ def _load_variants(csv_path, base_config):
         raise BatchValidationError("Batch tags must be non-empty")
     if len(tags) != len(set(tags)):
         raise BatchValidationError("Batch tags must be unique")
-    configurations = [
-        tuple((name, row.get(name, "")) for name in fieldnames if name != "tag")
-        for row in variants
-    ]
-    if len(configurations) != len(set(configurations)):
-        raise BatchValidationError("Batch parameter rows must be unique")
+    duplicate_tag_groups = find_duplicate_variant_tags(fieldnames, variants)
+    if duplicate_tag_groups:
+        log(f"Warning: {format_duplicate_variant_warning(duplicate_tag_groups)}")
     return fieldnames, variants
 
 
@@ -108,9 +123,9 @@ def _read_final_row(tag, model_name, result_dir):
 
 
 def _load_aggregate_rows(report_path, expected_signatures, active_tags, result_dir):
-    """Read and validate prior aggregate rows against current tag models."""
+    """Read prior aggregate rows and return active configuration changes."""
     if not report_path.exists():
-        return [], []
+        return [], [], []
     with report_path.open(newline="", encoding="utf-8") as report_file:
         reader = csv.DictReader(report_file)
         fieldnames = reader.fieldnames or []
@@ -120,12 +135,23 @@ def _load_aggregate_rows(report_path, expected_signatures, active_tags, result_d
     tags = [row.get("tag", "") for row in rows]
     if any(not tag for tag in tags) or len(tags) != len(set(tags)):
         raise BatchValidationError("Aggregate result.csv contains duplicate or empty tags")
+    configuration_changes = []
     for row in rows:
         _read_final_row(row["tag"], row["model"], result_dir)
         expected_signature = expected_signatures.get(row["tag"])
         if row["tag"] in active_tags and row.get("config_signature") != expected_signature:
-            raise BatchValidationError(f"Completed tag {row['tag']} has a different resolved configuration")
-    return fieldnames, rows
+            stored_config = json.loads(row.get("config_signature") or "{}")
+            resolved_config = json.loads(expected_signature)
+            changed_values = {
+                name: (stored_config.get(name), resolved_config.get(name))
+                for name in sorted(set(stored_config) | set(resolved_config))
+                if stored_config.get(name) != resolved_config.get(name)
+            }
+            configuration_changes.append({
+                "tag": row["tag"],
+                "changed_values": changed_values,
+            })
+    return fieldnames, rows, configuration_changes
 
 
 def _write_aggregate_rows(report_path, fieldnames, rows):
@@ -176,6 +202,27 @@ def _render_final_graph_movies(metadata, rows, result_dir, output_dir):
         _save_gif(image_paths, output_dir / f"{graph['filename']}.gif")
 
 
+def _annotate_metagraph_points(axis, graph, frame_rows, x_values, data_label):
+    """Label every metagraph point with its data_label value (small text to the right)."""
+    primary_value_name = graph["values"][0]
+    for x, row in zip(x_values, frame_rows):
+        label_text = str(row.get(data_label, ""))
+        if not label_text:
+            continue
+        try:
+            y = float(row[primary_value_name])
+        except (KeyError, TypeError, ValueError):
+            continue
+        axis.annotate(
+            label_text,
+            xy=(x, y),
+            xytext=(5, 0),
+            textcoords="offset points",
+            fontsize=7,
+            va="center",
+        )
+
+
 def _render_metagraphs(metadata, rows, output_dir):
     """Render cumulative aggregate plots and optional GIFs for declared metagraphs."""
     for graph in metadata["metagraphs"]:
@@ -198,18 +245,44 @@ def _render_metagraphs(metadata, rows, output_dir):
                 continue
 
         frame_paths = []
+        data_label = graph.get("data_label")
+        style = graph["style"]
+        values2 = graph.get("values2")
+        values3 = graph.get("values3")
         for index in range(1, len(ordered_rows) + 1):
             frame_rows = ordered_rows[:index]
             x_values = list(range(1, index + 1)) if xvalue is None else [
                 float(row[xvalue]) for row in frame_rows
             ]
             figure, axis = plt.subplots(figsize=(10, 6))
-            for value_name, label in zip(graph["values"], graph["labels"]):
+            for series_index, (value_name, label) in enumerate(zip(graph["values"], graph["labels"])):
+                size_name = values2[series_index] if values2 else None
+                color_name = values3[series_index] if values3 else None
                 try:
-                    y_values = [float(row[value_name]) for row in frame_rows]
+                    series_points = [
+                        (
+                            x,
+                            float(row[value_name]),
+                            float(row[size_name]) if size_name else None,
+                            float(row[color_name]) if color_name else None,
+                        )
+                        for x, row in zip(x_values, frame_rows)
+                    ]
                 except (KeyError, TypeError, ValueError):
                     continue
-                axis.plot(x_values, y_values, marker="o", linewidth=2, label=label)
+                render_series(
+                    axis,
+                    [point[0] for point in series_points],
+                    [point[1] for point in series_points],
+                    label,
+                    style,
+                    size_values=[point[2] for point in series_points] if size_name else None,
+                    color_values=[point[3] for point in series_points] if color_name else None,
+                    max_point_size=graph["max_point_size"],
+                    marker="o",
+                )
+            if data_label is not None:
+                _annotate_metagraph_points(axis, graph, frame_rows, x_values, data_label)
             axis.set_title(graph["title"])
             axis.set_xlabel(graph["xlabel"] or xvalue or "Batch run")
             axis.grid(True, alpha=0.3)
@@ -247,40 +320,19 @@ def _config_signature(config):
     return json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
 
 
-def run_batch(
-    csv_path=None,
-    config_path=None,
-    should_cancel=None,
-    should_finalize=None,
-    progress_callback=None,
-    graph_callback=None,
-    performance_callback=None,
-    result_dir=None,
-    selected_tag=None,
-):
-    """Run multiple simulations with parameter variants
-    
-    Args:
-        csv_path: multi.csv file with parameter variants (tag in first column)
-        config_path: base config.json to merge with variants
-        should_cancel: optional callback checked before and during each row
-        should_finalize: optional callback that finalizes the current row and batch
-        progress_callback: callback(completed, total, tag, status) for row updates
-        graph_callback: callback(output_dir, year) for generated graph frames
-        performance_callback: callback(elapsed_seconds, years, processed_animals)
-        result_dir: directory containing aggregate and tag-specific results
-        selected_tag: optional single validated batch tag to execute
-        
-    Returns:
-        list of result directories
-    """
-    if csv_path is None or config_path is None:
-        paths = resolve_experiment_paths(Path.cwd())
-        csv_path = paths["batch_path"] if csv_path is None else csv_path
-        config_path = paths["config_path"] if config_path is None else config_path
-        result_dir = paths["result_dir"] if result_dir is None else result_dir
+def format_configuration_change_warning(configuration_changes):
+    """Return changed completed tags and their old/new resolved values."""
+    lines = ["Completed batch configurations have changed:"]
+    for change in configuration_changes:
+        lines.append(f"{change['tag']}:")
+        for name, (old_value, new_value) in change["changed_values"].items():
+            lines.append(f"  {name}: {old_value!r} -> {new_value!r}")
+    return "\n".join(lines)
+
+
+def _resolve_batch_rows(csv_path, config_path):
+    """Return validated raw and fully resolved batch rows."""
     config_path = Path(config_path)
-    result_dir = Path(result_dir) if result_dir is not None else config_path.parent / "result"
     if config_path.exists():
         with config_path.open(encoding="utf-8") as config_file:
             persisted_config = json.load(config_file)
@@ -301,23 +353,97 @@ def run_batch(
         config = _resolve_row_config(base_config, variant, model_metadata["settings"])
         validate_runtime_config(config)
         resolved_rows.append((variant, config, model_metadata))
+    return fieldnames, variants, resolved_rows, metadata_by_model
+
+
+def inspect_batch_configuration_changes(
+    csv_path,
+    config_path,
+    result_dir=None,
+    selected_tag=None,
+):
+    """Return changed completed configurations without modifying results."""
+    config_path = Path(config_path)
+    result_dir = Path(result_dir) if result_dir is not None else config_path.parent / "result"
+    _, variants, resolved_rows, _ = _resolve_batch_rows(csv_path, config_path)
     execution_variants = variants
     if selected_tag is not None:
         execution_variants = [variant for variant in variants if variant["tag"] == selected_tag]
         if not execution_variants:
             raise BatchValidationError(f"Unknown selected batch tag: {selected_tag}")
-    active_tags = {row["tag"] for row in variants}
+    expected_signatures = {
+        config["tag"]: _config_signature(config)
+        for _, config, _ in resolved_rows
+    }
+    _, _, configuration_changes = _load_aggregate_rows(
+        result_dir / "result.csv",
+        expected_signatures,
+        {row["tag"] for row in execution_variants},
+        result_dir,
+    )
+    return configuration_changes
+
+
+def run_batch(
+    csv_path=None,
+    config_path=None,
+    should_cancel=None,
+    should_finalize=None,
+    progress_callback=None,
+    graph_callback=None,
+    performance_callback=None,
+    result_dir=None,
+    selected_tag=None,
+    keep_changed_tags=None,
+):
+    """Run multiple simulations with parameter variants
+    
+    Args:
+        csv_path: multi.csv file with parameter variants (tag in first column)
+        config_path: base config.json to merge with variants
+        should_cancel: optional callback checked before and during each row
+        should_finalize: optional callback that finalizes the current row and batch
+        progress_callback: callback(completed, total, tag, status) for row updates
+        graph_callback: callback(output_dir, year) for generated graph frames
+        performance_callback: callback(elapsed_seconds, years, processed_animals)
+        result_dir: directory containing aggregate and tag-specific results
+        selected_tag: optional single validated batch tag to execute
+        keep_changed_tags: tags whose changed configuration should keep old results
+        
+    Returns:
+        list of result directories
+    """
+    if csv_path is None or config_path is None:
+        paths = resolve_experiment_paths(Path.cwd())
+        csv_path = paths["batch_path"] if csv_path is None else csv_path
+        config_path = paths["config_path"] if config_path is None else config_path
+        result_dir = paths["result_dir"] if result_dir is None else result_dir
+    config_path = Path(config_path)
+    result_dir = Path(result_dir) if result_dir is not None else config_path.parent / "result"
+    fieldnames, variants, resolved_rows, metadata_by_model = _resolve_batch_rows(
+        csv_path,
+        config_path,
+    )
+    execution_variants = variants
+    if selected_tag is not None:
+        execution_variants = [variant for variant in variants if variant["tag"] == selected_tag]
+        if not execution_variants:
+            raise BatchValidationError(f"Unknown selected batch tag: {selected_tag}")
+    execution_tags = {row["tag"] for row in execution_variants}
     expected_signatures = {
         config["tag"]: _config_signature(config)
         for _, config, _ in resolved_rows
     }
     report_path = result_dir / "result.csv"
-    existing_fields, aggregate_rows = _load_aggregate_rows(
+    existing_fields, aggregate_rows, configuration_changes = _load_aggregate_rows(
         report_path,
         expected_signatures,
-        active_tags,
+        execution_tags,
         result_dir,
     )
+    if configuration_changes:
+        log(f"Warning: {format_configuration_change_warning(configuration_changes)}")
+        log("Affected calculations will be archived and recalculated.")
     final_fields = ["year", "duration_seconds"]
     for metadata in metadata_by_model.values():
         final_fields.extend(name for name, details in metadata["values"].items() if details["final"])
@@ -333,7 +459,9 @@ def run_batch(
         *resolved_setting_names,
         *final_fields,
     ]))
-    completed_tags = {row["tag"] for row in aggregate_rows}
+    keep_changed_tags = set(keep_changed_tags or ())
+    changed_tags = {change["tag"] for change in configuration_changes} - keep_changed_tags
+    completed_tags = {row["tag"] for row in aggregate_rows} - changed_tags
     results_dirs = []
     completed_count = 0
     total_count = len(execution_variants)
@@ -362,6 +490,9 @@ def run_batch(
         config, model_metadata = resolved_by_tag[tag]
         model_name = config["model"]
         tag_result_dir = result_dir / config.get("tag", "default")
+        if tag in changed_tags:
+            aggregate_rows = [row for row in aggregate_rows if row["tag"] != tag]
+            _write_aggregate_rows(report_path, aggregate_fields, aggregate_rows)
         if tag_result_dir.exists():
             archive_path(tag_result_dir)
         

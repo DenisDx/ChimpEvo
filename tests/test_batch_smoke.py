@@ -29,6 +29,39 @@ def make_batch_config():
 
 
 @pytest.mark.smoke
+def test_annotate_metagraph_points_labels_every_point():
+    """Label every metagraph point with its data_label value."""
+    import matplotlib.pyplot as plt
+
+    fig, axis = plt.subplots()
+    graph = {"values": ["avg_beta"]}
+    frame_rows = [{"tag": "first", "avg_beta": "0.1"}, {"tag": "second", "avg_beta": "0.2"}]
+
+    batch_module._annotate_metagraph_points(axis, graph, frame_rows, [1, 2], "tag")
+
+    assert [text.get_text() for text in axis.texts] == ["first", "second"]
+    plt.close(fig)
+
+
+@pytest.mark.smoke
+def test_annotate_metagraph_points_skips_blank_or_unparseable_values():
+    """Add no annotation for a point whose label or plotted value is unusable."""
+    import matplotlib.pyplot as plt
+
+    fig, axis = plt.subplots()
+    graph = {"values": ["avg_beta"]}
+    frame_rows = [
+        {"tag": "", "avg_beta": "0.1"},
+        {"tag": "second", "avg_beta": "not-a-number"},
+    ]
+
+    batch_module._annotate_metagraph_points(axis, graph, frame_rows, [1, 2], "tag")
+
+    assert len(axis.texts) == 0
+    plt.close(fig)
+
+
+@pytest.mark.smoke
 def test_batch_runs_each_csv_tag_and_can_repeat(tmp_path, monkeypatch):
     """Execute and repeat a short v1 batch for both tagged result folders."""
     monkeypatch.chdir(tmp_path)
@@ -244,18 +277,14 @@ def test_batch_rebuilds_root_artifacts_for_current_csv_tags_only(tmp_path, monke
 
 
 @pytest.mark.smoke
-@pytest.mark.parametrize(
-    "batch_text",
-    [
-        "tag,mutation_x\nbatch_a,0.1\nbatch_a,0.2\n",
-        "tag,mutation_x\nbatch_a,0.1\nbatch_b,0.1\n",
-    ],
-)
-def test_batch_rejects_duplicate_tags_or_parameter_rows(tmp_path, monkeypatch, batch_text):
-    """Reject ambiguous batch identities before starting any calculation."""
+def test_batch_rejects_duplicate_tags(tmp_path, monkeypatch):
+    """Reject duplicate batch identities before starting any calculation."""
     monkeypatch.chdir(tmp_path)
     (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
-    (tmp_path / "multi.csv").write_text(batch_text, encoding="utf-8")
+    (tmp_path / "multi.csv").write_text(
+        "tag,mutation_x\nbatch_a,0.1\nbatch_a,0.2\n",
+        encoding="utf-8",
+    )
 
     with pytest.raises(batch_module.BatchValidationError):
         run_batch("multi.csv", "config.json")
@@ -321,17 +350,114 @@ def test_batch_supports_per_row_models_and_preserves_input_values(tmp_path, monk
 
 
 @pytest.mark.smoke
-def test_batch_rejects_changed_resolved_config_for_completed_tag(tmp_path, monkeypatch):
-    """Do not resume a completed tag after any resolved setting changes."""
+def test_batch_warns_and_recalculates_changed_completed_tag(tmp_path, monkeypatch):
+    """Archive and replace a completed tag whose resolved configuration changed."""
     monkeypatch.chdir(tmp_path)
+    messages = []
     (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
     batch_path = tmp_path / "multi.csv"
     batch_path.write_text("tag,mutation_x\nbatch_a,0.10\n", encoding="utf-8")
     run_batch("multi.csv", "config.json")
     batch_path.write_text("tag,mutation_x\nbatch_a,0.20\n", encoding="utf-8")
+    monkeypatch.setattr(batch_module, "log", lambda message: messages.append(message))
 
-    with pytest.raises(batch_module.BatchValidationError, match="different resolved configuration"):
-        run_batch("multi.csv", "config.json")
+    result_dirs = run_batch("multi.csv", "config.json")
+
+    with (tmp_path / "result" / "result.csv").open(newline="", encoding="utf-8") as report_file:
+        rows = list(csv.DictReader(report_file))
+    assert result_dirs == ["result/batch_a"]
+    assert len(rows) == 1
+    assert rows[0]["tag"] == "batch_a"
+    assert rows[0]["mutation_x"] == "0.2"
+    assert any("mutation_x: 0.1 -> 0.2" in message for message in messages)
+    assert list((tmp_path / "result").glob("batch_a_*.bak"))
+
+
+@pytest.mark.smoke
+def test_batch_recalculates_only_changed_completed_tags(tmp_path, monkeypatch):
+    """Skip matching completed tags while replacing only changed configurations."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
+    batch_path = tmp_path / "multi.csv"
+    batch_path.write_text(
+        "tag,mutation_x\nunchanged,0.10\nchanged,0.20\n",
+        encoding="utf-8",
+    )
+    run_batch("multi.csv", "config.json")
+    batch_path.write_text(
+        "tag,mutation_x\nunchanged,0.10\nchanged,0.30\n",
+        encoding="utf-8",
+    )
+    executed_tags = []
+    original_run_simulation = batch_module.run_simulation
+
+    def record_run(config, *args, **kwargs):
+        """Record recalculated tags and delegate to the simulation runner."""
+        executed_tags.append(config["tag"])
+        return original_run_simulation(config, *args, **kwargs)
+
+    monkeypatch.setattr(batch_module, "run_simulation", record_run)
+
+    run_batch("multi.csv", "config.json")
+
+    assert executed_tags == ["changed"]
+    with (tmp_path / "result" / "result.csv").open(newline="", encoding="utf-8") as report_file:
+        rows = list(csv.DictReader(report_file))
+    assert [(row["tag"], row["mutation_x"]) for row in rows] == [
+        ("unchanged", "0.1"),
+        ("changed", "0.3"),
+    ]
+
+
+@pytest.mark.smoke
+def test_batch_keeps_old_results_for_tags_marked_keep(tmp_path, monkeypatch):
+    """Skip recalculation and preserve the stale row for a tag marked to keep."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
+    batch_path = tmp_path / "multi.csv"
+    batch_path.write_text("tag,mutation_x\nchanged,0.10\n", encoding="utf-8")
+    run_batch("multi.csv", "config.json")
+    original_result_file = (tmp_path / "result" / "changed" / "result.csv").read_bytes()
+    batch_path.write_text("tag,mutation_x\nchanged,0.20\n", encoding="utf-8")
+    monkeypatch.setattr(
+        batch_module,
+        "run_simulation",
+        lambda *args, **kwargs: pytest.fail("kept tag should not be recalculated"),
+    )
+
+    result_dirs = run_batch("multi.csv", "config.json", keep_changed_tags={"changed"})
+
+    assert result_dirs == ["result/changed"]
+    assert (tmp_path / "result" / "changed" / "result.csv").read_bytes() == original_result_file
+    with (tmp_path / "result" / "result.csv").open(newline="", encoding="utf-8") as report_file:
+        rows = list(csv.DictReader(report_file))
+    assert [(row["tag"], row["mutation_x"]) for row in rows] == [("changed", "0.1")]
+
+
+@pytest.mark.smoke
+def test_batch_change_preflight_limits_report_to_selected_tag(tmp_path, monkeypatch):
+    """Validate the whole batch but report configuration changes for one selected row."""
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
+    batch_path = tmp_path / "multi.csv"
+    batch_path.write_text(
+        "tag,mutation_x\nfirst,0.10\nsecond,0.20\n",
+        encoding="utf-8",
+    )
+    run_batch("multi.csv", "config.json")
+    batch_path.write_text(
+        "tag,mutation_x\nfirst,0.30\nsecond,0.40\n",
+        encoding="utf-8",
+    )
+
+    changes = batch_module.inspect_batch_configuration_changes(
+        "multi.csv",
+        "config.json",
+        selected_tag="second",
+    )
+
+    assert [change["tag"] for change in changes] == ["second"]
+    assert changes[0]["changed_values"]["mutation_x"] == (0.2, 0.4)
 
 
 @pytest.mark.smoke
@@ -378,3 +504,21 @@ def test_selected_batch_row_still_validates_full_csv(tmp_path, monkeypatch):
         run_batch("multi.csv", "config.json", selected_tag="selected")
 
     assert not (tmp_path / "result").exists()
+
+
+@pytest.mark.smoke
+def test_batch_warns_and_runs_identical_parameter_rows(tmp_path, monkeypatch):
+    """Continue CLI execution after listing tags with identical raw parameters."""
+    monkeypatch.chdir(tmp_path)
+    messages = []
+    (tmp_path / "config.json").write_text(json.dumps(make_batch_config()), encoding="utf-8")
+    (tmp_path / "multi.csv").write_text(
+        "tag,mutation_x\nbatch_a,0.1\nbatch_b,0.1\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(batch_module, "log", lambda message: messages.append(message))
+
+    result_dirs = run_batch("multi.csv", "config.json")
+
+    assert len(result_dirs) == 2
+    assert any("batch_a, batch_b" in message for message in messages)

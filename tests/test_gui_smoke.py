@@ -12,6 +12,22 @@ from model import Model
 from metadata import validate_model_metadata
 
 
+def _stub_modal_dialog(gui_app, monkeypatch, interact):
+    """Answer the next grab_set/wait_window dialog in-process, never on screen."""
+    def immediate_wait_window(window):
+        """Interact with the dialog synchronously instead of pumping a live event loop."""
+        window.update_idletasks()
+        interact(window)
+
+    monkeypatch.setattr(gui_app.root, "wait_window", immediate_wait_window)
+
+
+def _dialog_descendants(widget):
+    """Return every nested Tk child below one widget."""
+    children = list(widget.winfo_children())
+    return children + [nested for child in children for nested in _dialog_descendants(child)]
+
+
 @pytest.mark.smoke
 @pytest.mark.parametrize("content", ["not json", "[]"])
 def test_load_config_rejects_invalid_documents(tmp_path, content):
@@ -297,10 +313,32 @@ def test_gui_model_settings_grid_uses_declared_metadata(gui_app):
     max_population_row = gui_app.model_setting_rows["max_population"]
 
     assert str(gui_app.settings_canvas.cget("yscrollcommand"))
+    assert "min_iterations" in gui_app.core_setting_widgets
     assert set(gui_app.model_setting_rows) == set(gui_app.model_metadata["settings"])
     assert max_population_row["supported"] is True
     assert max_population_row["bounds"].get() == "100 <= x <= 100000000"
     assert max_population_row["description"].get() == "Population carrying capacity"
+
+
+@pytest.mark.smoke
+def test_gui_batch_graph_callback_does_not_reopen_progress(gui_app, monkeypatch):
+    """Queue batch graphs without raising a Progress window hidden by the user."""
+    progress_shows = []
+
+    def fake_run_batch(*args, **kwargs):
+        """Report one graph without executing a simulation."""
+        kwargs["graph_callback"]("result/row", 7)
+
+    monkeypatch.setattr(gui_module, "run_batch", fake_run_batch)
+    monkeypatch.setattr(gui_app, "_show_progress_window", lambda: progress_shows.append(True))
+    monkeypatch.setattr(gui_app.root, "after", lambda *args: None)
+    gui_app.is_batch_running = True
+    gui_app.batch_selected_tag = None
+
+    gui_app._run_batch_thread()
+
+    assert progress_shows == []
+    assert gui_app._pending_graph_update == ("result/row", 7)
 
 
 @pytest.mark.smoke
@@ -394,6 +432,212 @@ def test_gui_batch_tab_loads_and_saves_csv_only_after_action(gui_app, tmp_path):
 
 
 @pytest.mark.smoke
+def test_gui_duplicate_batch_save_can_be_cancelled(gui_app, monkeypatch, tmp_path):
+    """List duplicate-row tags and leave the saved CSV unchanged on Cancel."""
+    prompts = []
+    batch_path = tmp_path / "duplicates.csv"
+    gui_app.batch_columns = ["tag", "mutation_x"]
+    gui_app.batch_rows = [
+        {"tag": "first", "mutation_x": "0.5"},
+        {"tag": "second", "mutation_x": "0.5"},
+    ]
+    gui_app._set_batch_dirty(True)
+    monkeypatch.setattr(
+        gui_module.messagebox,
+        "askokcancel",
+        lambda title, text: prompts.append((title, text)) or False,
+    )
+
+    assert gui_app._save_batch_csv(batch_path) is False
+    assert not batch_path.exists()
+    assert "first, second" in prompts[0][1]
+    assert gui_app.is_batch_dirty is True
+
+
+@pytest.mark.smoke
+def test_gui_batch_start_confirms_duplicate_rows_once(gui_app, monkeypatch):
+    """Confirm duplicate rows once before saving dirty inputs and launching."""
+    confirmations = []
+    launches = []
+    gui_app.batch_columns = ["tag", "mutation_x"]
+    gui_app.batch_rows = [
+        {"tag": "first", "mutation_x": "0.5"},
+        {"tag": "second", "mutation_x": "0.5"},
+    ]
+    gui_app._set_batch_dirty(True)
+    gui_app.is_config_dirty = False
+    monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(
+        gui_module,
+        "inspect_batch_configuration_changes",
+        lambda *args, **kwargs: [],
+    )
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
+    monkeypatch.setattr(
+        gui_module.messagebox,
+        "askokcancel",
+        lambda *args: confirmations.append(args) or True,
+    )
+    monkeypatch.setattr(gui_app, "_launch_batch", lambda: launches.append(True))
+
+    gui_app._on_start_batch()
+
+    assert len(confirmations) == 1
+    assert launches == [True]
+
+
+@pytest.mark.smoke
+def test_gui_changed_batch_configuration_can_cancel_launch(gui_app, monkeypatch):
+    """List changed resolved values and leave the batch stopped on Cancel."""
+    observed = {}
+    launches = []
+    gui_app.is_config_dirty = False
+    gui_app.is_batch_dirty = False
+    monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_duplicate_batch_rows", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_saved_batch_inputs", lambda: True)
+    monkeypatch.setattr(
+        gui_module,
+        "inspect_batch_configuration_changes",
+        lambda *args, **kwargs: [{
+            "tag": "set1",
+            "changed_values": {"mutation_x": (0.1, 0.2)},
+        }],
+    )
+    monkeypatch.setattr(gui_app, "_launch_batch", lambda: launches.append(True))
+
+    def decline_dialog(dialog):
+        """Read the scrollable warning text and click Cancel."""
+        widgets = _dialog_descendants(dialog)
+        text_widget = next(widget for widget in widgets if widget.winfo_class() == "Text")
+        cancel_button = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Cancel"
+        )
+        observed["text"] = text_widget.get("1.0", "end-1c")
+        cancel_button.invoke()
+
+    _stub_modal_dialog(gui_app, monkeypatch, decline_dialog)
+    gui_app._on_start_batch()
+
+    assert launches == []
+    assert "set1" in observed["text"]
+    assert "mutation_x: 0.1 -> 0.2" in observed["text"]
+
+
+@pytest.mark.smoke
+def test_gui_changed_batch_configuration_can_continue_launch(gui_app, monkeypatch):
+    """Launch once after choosing to delete old results, without a resume prompt."""
+    launches = []
+    generic_prompts = []
+    gui_app.is_config_dirty = False
+    gui_app.is_batch_dirty = False
+    monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_duplicate_batch_rows", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_saved_batch_inputs", lambda: True)
+    monkeypatch.setattr(
+        gui_module,
+        "inspect_batch_configuration_changes",
+        lambda *args, **kwargs: [{
+            "tag": "set1",
+            "changed_values": {"mutation_x": (0.1, 0.2)},
+        }],
+    )
+    monkeypatch.setattr(
+        gui_module.messagebox,
+        "askyesno",
+        lambda *args: generic_prompts.append(args) or True,
+    )
+    monkeypatch.setattr(gui_app, "_launch_batch", lambda: launches.append(True))
+
+    def delete_dialog(dialog):
+        """Click Delete old results on the scrollable changed-configuration dialog."""
+        delete_button = next(
+            widget
+            for widget in _dialog_descendants(dialog)
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Delete old results"
+        )
+        delete_button.invoke()
+
+    _stub_modal_dialog(gui_app, monkeypatch, delete_dialog)
+    gui_app._on_start_batch()
+
+    assert launches == [True]
+    assert generic_prompts == []
+    assert gui_app.batch_keep_changed_tags == set()
+
+
+@pytest.mark.smoke
+def test_gui_changed_batch_configuration_can_keep_old_results(gui_app, monkeypatch):
+    """Launch while keeping old results for tags where the user chose to keep them."""
+    launches = []
+    gui_app.is_config_dirty = False
+    gui_app.is_batch_dirty = False
+    monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_duplicate_batch_rows", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_saved_batch_inputs", lambda: True)
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
+    monkeypatch.setattr(
+        gui_module,
+        "inspect_batch_configuration_changes",
+        lambda *args, **kwargs: [{
+            "tag": "set1",
+            "changed_values": {"mutation_x": (0.1, 0.2)},
+        }],
+    )
+    monkeypatch.setattr(gui_app, "_launch_batch", lambda: launches.append(True))
+
+    def keep_dialog(dialog):
+        """Click Keep old results on the scrollable changed-configuration dialog."""
+        keep_button = next(
+            widget
+            for widget in _dialog_descendants(dialog)
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Keep old results"
+        )
+        keep_button.invoke()
+
+    _stub_modal_dialog(gui_app, monkeypatch, keep_dialog)
+    gui_app._on_start_batch()
+
+    assert launches == [True]
+    assert gui_app.batch_keep_changed_tags == {"set1"}
+
+
+@pytest.mark.smoke
+def test_gui_changed_batch_configuration_dialog_caps_height_and_scrolls(gui_app, monkeypatch):
+    """Cap a long changed-configuration list at 75% of the screen height with a scrollbar."""
+    gui_app.root.deiconify()
+    gui_app.root.update_idletasks()
+    warning_text = "\n".join(f"tag_{index}: mutation_x: 0.1 -> 0.{index}" for index in range(200))
+    observed = {}
+
+    def inspect_dialog(dialog):
+        """Capture the capped dialog geometry and scroll wiring, then close it."""
+        widgets = _dialog_descendants(dialog)
+        text_widget = next(widget for widget in widgets if widget.winfo_class() == "Text")
+        cancel_button = next(
+            widget
+            for widget in widgets
+            if widget.winfo_class() == "TButton" and widget.cget("text") == "Cancel"
+        )
+        observed["dialog_height"] = dialog.winfo_height()
+        observed["max_height"] = int(dialog.winfo_screenheight() * 0.75)
+        observed["scrollcommand"] = str(text_widget.cget("yscrollcommand"))
+        observed["text"] = text_widget.get("1.0", "end-1c")
+        cancel_button.invoke()
+
+    _stub_modal_dialog(gui_app, monkeypatch, inspect_dialog)
+
+    decision = gui_app._show_configuration_change_dialog(warning_text)
+
+    assert decision == "cancel"
+    assert observed["text"] == warning_text
+    assert observed["scrollcommand"]
+    assert observed["dialog_height"] <= observed["max_height"]
+
+
+@pytest.mark.smoke
 def test_gui_load_model_batch_defaults_updates_only_editor_memory(gui_app, monkeypatch):
     """Load active model batch defaults without writing multi.csv."""
     notices = []
@@ -430,6 +674,9 @@ def test_gui_batch_start_and_stop_manage_worker_state(gui_app, monkeypatch):
     launches = []
     gui_app.is_config_dirty = False
     gui_app.is_batch_dirty = False
+    monkeypatch.setattr(gui_app, "_confirm_duplicate_batch_rows", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_batch_configuration_changes", lambda selected_tag=None: ([], set()))
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
     monkeypatch.setattr(
         gui_app,
         "_launch_batch",
@@ -488,7 +735,9 @@ def test_gui_selected_batch_row_keeps_existing_results_when_cancelled(gui_app, m
     result_file.write_text("old results", encoding="utf-8")
     gui_app.batch_tree.selection_set("0")
     monkeypatch.setattr(gui_app, "_update_config_from_ui", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_duplicate_batch_rows", lambda: True)
     monkeypatch.setattr(gui_app, "_confirm_saved_batch_inputs", lambda: True)
+    monkeypatch.setattr(gui_app, "_confirm_batch_configuration_changes", lambda selected_tag=None: ([], set()))
     monkeypatch.setattr(gui_app, "_ask_tag_result_replacement", lambda tag: False)
     monkeypatch.setattr(gui_app, "_launch_batch", lambda tag: launches.append(tag))
 
@@ -880,7 +1129,7 @@ def test_gui_opens_selected_experiment_in_platform_file_manager(gui_app, monkeyp
 
 
 @pytest.mark.smoke
-def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app):
+def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app, monkeypatch):
     """Clone exact saved files and selected results, then activate the completed copy."""
     gui_app._create_experiment("source", "model_base")
     gui_app._activate_experiment("source")
@@ -903,13 +1152,8 @@ def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app):
         children = list(widget.winfo_children())
         return children + [nested for child in children for nested in descendants(child)]
 
-    def complete_dialog():
+    def complete_dialog(dialog):
         """Select result copying and submit the live clone form."""
-        dialog = next(
-            child
-            for child in gui_app.root.winfo_children()
-            if isinstance(child, tk.Toplevel) and child.title() == "Clone Experiment"
-        )
         widgets = descendants(dialog)
         name_entry = next(widget for widget in widgets if widget.winfo_class() == "TEntry")
         copy_check = next(
@@ -929,7 +1173,7 @@ def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app):
         copy_check.invoke()
         ok_button.invoke()
 
-    gui_app.root.after(0, complete_dialog)
+    _stub_modal_dialog(gui_app, monkeypatch, complete_dialog)
     gui_app._on_clone_experiment()
 
     clone_dir = source_dir.parent / "cloned_experiment"
@@ -957,7 +1201,7 @@ def test_gui_clone_dialog_copies_results_and_activates_clone(gui_app):
 
 
 @pytest.mark.smoke
-def test_gui_clone_dialog_disables_result_copy_without_results(gui_app):
+def test_gui_clone_dialog_disables_result_copy_without_results(gui_app, monkeypatch):
     """Keep Copy results unchecked and disabled for an empty result directory."""
     gui_app._create_experiment("source", "model_base")
     gui_app._activate_experiment("source")
@@ -971,13 +1215,8 @@ def test_gui_clone_dialog_disables_result_copy_without_results(gui_app):
         children = list(widget.winfo_children())
         return children + [nested for child in children for nested in descendants(child)]
 
-    def cancel_dialog():
+    def cancel_dialog(dialog):
         """Inspect and cancel the live clone form."""
-        dialog = next(
-            child
-            for child in gui_app.root.winfo_children()
-            if isinstance(child, tk.Toplevel) and child.title() == "Clone Experiment"
-        )
         widgets = descendants(dialog)
         copy_check = next(
             widget
@@ -993,7 +1232,7 @@ def test_gui_clone_dialog_disables_result_copy_without_results(gui_app):
         observed["selected"] = copy_check.instate(["selected"])
         cancel_button.invoke()
 
-    gui_app.root.after(0, cancel_dialog)
+    _stub_modal_dialog(gui_app, monkeypatch, cancel_dialog)
     clone_dir = gui_app._prompt_clone_experiment(
         gui_app.experiment_manager.get_active_experiment_name(),
     )
@@ -1003,7 +1242,7 @@ def test_gui_clone_dialog_disables_result_copy_without_results(gui_app):
 
 
 @pytest.mark.smoke
-def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_app):
+def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_app, monkeypatch):
     """Offer discovered models in a usable dialog and create files from the selection."""
     gui_app.root.deiconify()
     gui_app.root.update_idletasks()
@@ -1015,13 +1254,8 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
         children = list(widget.winfo_children())
         return children + [nested for child in children for nested in descendants(child)]
 
-    def complete_dialog():
+    def complete_dialog(dialog):
         """Inspect and submit the live modal new-experiment form."""
-        dialog = next(
-            child
-            for child in gui_app.root.winfo_children()
-            if isinstance(child, tk.Toplevel) and child.title() == "New Experiment"
-        )
         gui_app.root.update_idletasks()
         widgets = descendants(dialog)
         name_entry = next(widget for widget in widgets if widget.winfo_class() == "TEntry")
@@ -1052,7 +1286,7 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
         observed["description"] = description_text.get("1.0", "end-1c")
         create_button.invoke()
 
-    gui_app.root.after(0, complete_dialog)
+    _stub_modal_dialog(gui_app, monkeypatch, complete_dialog)
     experiment_dir = gui_app._prompt_new_experiment()
 
     config = json.loads((experiment_dir / "config.json").read_text(encoding="utf-8"))
@@ -1078,20 +1312,15 @@ def test_gui_new_experiment_dialog_selects_model_and_creates_its_defaults(gui_ap
 
 
 @pytest.mark.smoke
-def test_gui_about_model_button_opens_modal_selected_description(gui_app):
+def test_gui_about_model_button_opens_modal_selected_description(gui_app, monkeypatch):
     """Show the current selector model in a modal read-only Markdown window."""
     gui_app.root.deiconify()
     selected_model = "model_base_fast_fixed_fecundity"
     gui_app.model_var.set(selected_model)
     observed = {}
 
-    def inspect_dialog():
+    def inspect_dialog(dialog):
         """Capture the live About dialog and close it through its button."""
-        dialog = next(
-            child
-            for child in gui_app.root.winfo_children()
-            if isinstance(child, tk.Toplevel) and child.title().startswith("About Model:")
-        )
         descendants = list(dialog.winfo_children())
         markdown_view = next(
             widget for widget in descendants if isinstance(widget, gui_module.LightweightMarkdownView)
@@ -1106,7 +1335,7 @@ def test_gui_about_model_button_opens_modal_selected_description(gui_app):
         observed["description"] = markdown_view.text.get("1.0", "end-1c")
         close_button.invoke()
 
-    gui_app.root.after(0, inspect_dialog)
+    _stub_modal_dialog(gui_app, monkeypatch, inspect_dialog)
     gui_app._on_about_model()
 
     assert observed["title"] == f"About Model: {selected_model}"

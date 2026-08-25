@@ -21,7 +21,13 @@ import torch
 from PIL import Image, ImageTk
 
 from main import PopulationSimulation, set_logger, log
-from batch import run_batch
+from batch import (
+    find_duplicate_variant_tags,
+    format_configuration_change_warning,
+    format_duplicate_variant_warning,
+    inspect_batch_configuration_changes,
+    run_batch,
+)
 from experiment_manager import ExperimentManager, archive_path, atomic_write_text
 from load_model import ModelLoadError, discover_models, load_model_class
 from metadata import validate_model_metadata
@@ -31,6 +37,7 @@ from settings import DEFAULT_SETTINGS, PARAMETER_DESCRIPTIONS, PARAMETER_RANGES
 CORE_SETTING_NAMES = (
     "stat_generation_period",
     "graph_generation_period",
+    "min_iterations",
     "max_iterations",
 )
 
@@ -1400,6 +1407,7 @@ class SimulationGUI:
         self._set_batch_dirty(False)
         self.is_batch_running = False
         self.batch_cancel_requested = False
+        self.batch_keep_changed_tags = set()
         self.batch_status_var = tk.StringVar(value="Ready")
         edit_controls = ttk.Frame(parent)
         edit_controls.pack(fill=tk.X, padx=5, pady=5)
@@ -1501,13 +1509,29 @@ class SimulationGUI:
         self._set_batch_dirty(True)
         self._render_batch_grid()
 
-    def _save_batch_csv(self, file_path=None):
+    def _confirm_duplicate_batch_rows(self):
+        """Confirm raw-identical batch rows while keeping duplicate tags invalid."""
+        duplicate_tag_groups = find_duplicate_variant_tags(
+            self.batch_columns,
+            self.batch_rows,
+        )
+        if not duplicate_tag_groups:
+            return True
+        warning = format_duplicate_variant_warning(duplicate_tag_groups)
+        return messagebox.askokcancel(
+            "Duplicate batch rows",
+            f"{warning}. Continue?",
+        )
+
+    def _save_batch_csv(self, file_path=None, confirm_duplicates=True):
         """Write the current valid batch table to CSV."""
         if not self.batch_columns or self.batch_columns[0] != "tag":
             raise ValueError("Batch CSV must have tag as its first column")
         tags = [row.get("tag", "").strip() for row in self.batch_rows]
         if any(not tag for tag in tags) or len(tags) != len(set(tags)):
             raise ValueError("Batch tags must be non-empty and unique")
+        if confirm_duplicates and not self._confirm_duplicate_batch_rows():
+            return False
         path = Path(file_path or self.batch_path)
         output = io.StringIO()
         writer = csv.DictWriter(output, fieldnames=self.batch_columns, lineterminator="\n")
@@ -1516,6 +1540,7 @@ class SimulationGUI:
         atomic_write_text(path, output.getvalue())
         self.batch_path = path
         self._set_batch_dirty(False)
+        return True
 
     def _render_batch_grid(self):
         """Render current batch rows and columns into the Treeview."""
@@ -1585,7 +1610,8 @@ class SimulationGUI:
     def _on_save_batch(self):
         """Save the editable batch table and report validation errors."""
         try:
-            self._save_batch_csv()
+            if not self._save_batch_csv():
+                return
         except (OSError, ValueError) as error:
             messagebox.showerror("Batch error", str(error))
             return
@@ -1618,21 +1644,114 @@ class SimulationGUI:
         ):
             return False
         if self.is_batch_dirty:
-            self._save_batch_csv()
+            self._save_batch_csv(confirm_duplicates=False)
         return True
+
+    def _confirm_batch_configuration_changes(self, selected_tag=None):
+        """Return (had_changes, keep_tags) after a dialog choice, or None on cancel."""
+        configuration_changes = inspect_batch_configuration_changes(
+            self.batch_path,
+            self.config_file,
+            result_dir=self._result_root(),
+            selected_tag=selected_tag,
+        )
+        if not configuration_changes:
+            return [], set()
+        warning = format_configuration_change_warning(configuration_changes)
+        decision = self._show_configuration_change_dialog(warning)
+        if decision == "cancel":
+            return None
+        if decision == "keep":
+            return configuration_changes, {change["tag"] for change in configuration_changes}
+        return configuration_changes, set()
+
+    def _show_configuration_change_dialog(self, warning_text):
+        """Show a scrollable changed-configuration choice capped at 75% of the screen height."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Changed batch configurations")
+        dialog.transient(self.root)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(0, weight=1)
+
+        text_frame = ttk.Frame(dialog)
+        text_frame.grid(row=0, column=0, sticky="nsew", padx=20, pady=(20, 8))
+        text_frame.columnconfigure(0, weight=1)
+        text_frame.rowconfigure(0, weight=1)
+        text_widget = tk.Text(
+            text_frame,
+            wrap=tk.WORD,
+            width=84,
+            height=warning_text.count("\n") + 1,
+            relief=tk.FLAT,
+            borderwidth=0,
+        )
+        text_widget.insert("1.0", warning_text)
+        text_widget.configure(state=tk.DISABLED)
+        scrollbar = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=text_widget.yview)
+        text_widget.configure(yscrollcommand=scrollbar.set)
+        text_widget.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        ttk.Label(
+            dialog,
+            text="Choose how to handle previously completed results for these tags.",
+            wraplength=560,
+            justify=tk.LEFT,
+        ).grid(row=1, column=0, sticky="ew", padx=20, pady=(0, 8))
+
+        result = []
+
+        def choose(decision):
+            """Record the user's choice and close the dialog."""
+            result.append(decision)
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=2, column=0, sticky=tk.SE, padx=20, pady=(0, 16))
+        ttk.Button(
+            buttons, text="Delete old results", command=lambda: choose("delete"),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            buttons, text="Keep old results", command=lambda: choose("keep"),
+        ).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(
+            buttons, text="Cancel", command=lambda: choose("cancel"),
+        ).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: choose("cancel"))
+        dialog.bind("<Escape>", lambda event: choose("cancel"))
+
+        dialog.update_idletasks()
+        # Cap the natural height at 75% of the screen; smaller content stays smaller.
+        max_height = int(dialog.winfo_screenheight() * 0.75)
+        if dialog.winfo_reqheight() > max_height:
+            dialog.geometry(f"{dialog.winfo_reqwidth()}x{max_height}")
+            dialog.update_idletasks()
+        dialog_x = self.root.winfo_rootx() + (self.root.winfo_width() - dialog.winfo_width()) // 2
+        dialog_y = self.root.winfo_rooty() + (self.root.winfo_height() - dialog.winfo_height()) // 2
+        dialog.geometry(f"+{max(0, dialog_x)}+{max(0, dialog_y)}")
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return result[0] if result else "cancel"
 
     def _on_start_batch(self):
         """Validate, save, and launch the current batch inside the GUI."""
         if self.is_batch_running or not self._update_config_from_ui():
             return
+        if not self._confirm_duplicate_batch_rows():
+            return
         try:
             if not self._confirm_saved_batch_inputs():
                 return
+            confirmation = self._confirm_batch_configuration_changes()
+            if confirmation is None:
+                return
+            configuration_changes, keep_tags = confirmation
         except (OSError, ValueError) as error:
             messagebox.showerror("Batch error", str(error))
             return
+        self.batch_keep_changed_tags = keep_tags
         result_dir = self._result_root()
-        if result_dir.exists() and any(result_dir.iterdir()):
+        if not configuration_changes and result_dir.exists() and any(result_dir.iterdir()):
             completed_count = self._aggregate_result_count()
             if not messagebox.askyesno(
                 "Existing results",
@@ -1649,6 +1768,8 @@ class SimulationGUI:
             return
         if not self._update_config_from_ui():
             return
+        if not self._confirm_duplicate_batch_rows():
+            return
         try:
             if not self._confirm_saved_batch_inputs():
                 return
@@ -1659,8 +1780,17 @@ class SimulationGUI:
         if not selected_tag:
             messagebox.showerror("Batch error", "Selected row must have a tag.")
             return
+        try:
+            confirmation = self._confirm_batch_configuration_changes(selected_tag)
+            if confirmation is None:
+                return
+            configuration_changes, keep_tags = confirmation
+        except (OSError, ValueError) as error:
+            messagebox.showerror("Batch error", str(error))
+            return
+        self.batch_keep_changed_tags = keep_tags
         result_dir = self._result_root() / selected_tag
-        if result_dir.exists() and any(result_dir.iterdir()):
+        if not configuration_changes and result_dir.exists() and any(result_dir.iterdir()):
             if not self._ask_tag_result_replacement(selected_tag):
                 return
             archive_path(result_dir)
@@ -1719,8 +1849,6 @@ class SimulationGUI:
         def report_graph(output_dir, year):
             """Queue one generated batch graph frame for the GUI viewer."""
             self._pending_graph_update = (str(output_dir), year)
-            if not self.is_closing:
-                self.root.after(0, self._show_batch_graphs)
 
         def report_performance(elapsed, years, total_animals):
             """Schedule one batch performance snapshot on the Tk event loop."""
@@ -1743,6 +1871,7 @@ class SimulationGUI:
                 graph_callback=report_graph,
                 performance_callback=report_performance,
                 selected_tag=self.batch_selected_tag,
+                keep_changed_tags=self.batch_keep_changed_tags,
             )
         except Exception as error:
             self.batch_failed = True
@@ -1759,10 +1888,6 @@ class SimulationGUI:
         self.batch_status_var.set(f"{completed}/{total}: {tag} ({status})")
         batch_row = next((row for row in self.batch_rows if row.get("tag", "").strip() == tag), None)
         self._set_progress_calculation(tag, batch_row)
-
-    def _show_batch_graphs(self):
-        """Show Progress when the active batch run generates a graph frame."""
-        self._show_progress_window()
 
     def _finish_batch(self):
         """Restore Batch tab controls after the worker exits."""

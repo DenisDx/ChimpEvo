@@ -1,4 +1,5 @@
 from unittest.mock import Mock
+from pathlib import Path
 
 import pytest
 
@@ -85,6 +86,7 @@ def test_step_collects_current_v1_statistics(tmp_path, monkeypatch):
         "dead": 0,
         "prop_aging": 0.0,
         "avg_beta": pytest.approx(0.11),
+        "beta_variance": pytest.approx(0.0),
         "avg_beta_ema": pytest.approx(0.11),
         "beta_min": pytest.approx(0.11),
         "beta_max": pytest.approx(0.11),
@@ -188,7 +190,7 @@ def test_finalize_request_uses_successful_completion_contract(tmp_path, monkeypa
     monkeypatch.chdir(tmp_path)
 
     results, completed = run_simulation(
-        make_settings(tag="finalized", stat_generation_period=100),
+        make_settings(tag="finalized", stat_generation_period=100, min_iterations=50),
         should_finalize=lambda: True,
         return_completion=True,
     )
@@ -210,6 +212,7 @@ def test_yearly_statistics_use_model_scalar_values(tmp_path, monkeypatch):
         "dead": 2,
         "prop_aging": 0.25,
         "avg_beta": 0.42,
+        "beta_variance": 0.02,
         "avg_beta_ema": 0.41,
         "beta_min": 0.20,
         "beta_max": 0.60,
@@ -229,6 +232,7 @@ def test_yearly_statistics_use_model_scalar_values(tmp_path, monkeypatch):
         "dead": 2,
         "prop_aging": 0.25,
         "avg_beta": 0.42,
+        "beta_variance": 0.02,
         "avg_beta_ema": 0.41,
         "beta_min": 0.20,
         "beta_max": 0.60,
@@ -254,6 +258,49 @@ def test_model_stop_reason_is_checked_between_statistics_periods(tmp_path, monke
     assert len(simulation.results) == 1
     assert simulation.results[0]["year"] == 1
     simulation.model.should_stop.assert_called_once_with()
+
+
+@pytest.mark.smoke
+def test_model_stop_reason_is_suppressed_until_minimum_iteration(tmp_path, monkeypatch):
+    """Maintain model stop state without forcing early statistics or termination."""
+    monkeypatch.chdir(tmp_path)
+    simulation = PopulationSimulation(make_settings(
+        min_iterations=3,
+        stat_generation_period=10,
+    ))
+    simulation.year = 1
+    simulation.results = []
+    simulation._generate_year_graphs = Mock()
+    simulation.model.should_stop = Mock(return_value="custom stop")
+
+    assert simulation.step() is True
+    assert simulation.year == 2
+    assert simulation.results == []
+    assert simulation.step() is False
+    assert simulation.year == 3
+    assert [row["year"] for row in simulation.results] == [2]
+    assert simulation.model.should_stop.call_count == 2
+
+
+@pytest.mark.smoke
+def test_runtime_config_rejects_minimum_above_maximum(tmp_path, monkeypatch):
+    """Reject an impossible core iteration interval before simulation starts."""
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(ValueError, match="min_iterations"):
+        PopulationSimulation(make_settings(min_iterations=101, max_iterations=100))
+
+
+@pytest.mark.smoke
+def test_runtime_config_defaults_missing_minimum_to_zero(tmp_path, monkeypatch):
+    """Keep persisted pre-v2.2 configurations backward compatible."""
+    monkeypatch.chdir(tmp_path)
+    settings = make_settings()
+    settings.pop("min_iterations")
+
+    simulation = PopulationSimulation(settings)
+
+    assert simulation.settings["min_iterations"] == 0
 
 
 @pytest.mark.smoke
@@ -297,3 +344,51 @@ def test_age_only_external_model_completes_without_beta_outputs(tmp_path, monkey
     assert (result_dir / "final.csv").is_file()
     assert (result_dir / "age_distribution.png").is_file()
     assert not (result_dir / "betaoccurrence0.png").exists()
+
+
+@pytest.mark.smoke
+def test_points_style_model_graph_renders_scatter_with_size_and_color(tmp_path, monkeypatch):
+    """Render a declared points-style time graph sized/colored by extra scalars."""
+    from PIL import Image
+
+    class Model_points_style(Model_base):
+        """Declare one points-style time graph sized/colored by beta aggregates."""
+
+        @staticmethod
+        def add_graphs():
+            return [{
+                "filename": "beta_points",
+                "title": "Beta Points",
+                "values": ["avg_beta"],
+                "labels": ["Average beta"],
+                "type": "time",
+                "annual": True,
+                "final": True,
+                "animated": False,
+                "style": "points",
+                "values2": ["beta_variance"],
+                "values3": ["beta_min"],
+                "max_point_size": 50,
+            }]
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module, "load_model_class", Mock(return_value=Model_points_style))
+    simulation = PopulationSimulation(make_settings(model="model_points_style", tag="points_style"))
+    simulation.year = 1
+    simulation.results = [{
+        "year": 0,
+        "count": 4,
+        "avg_age": 1.0,
+        "born": 0,
+        "dead": 0,
+        "avg_beta": 0.11,
+        "beta_variance": 0.01,
+        "beta_min": 0.1,
+    }]
+
+    output_dir = simulation.export_results(successful=True)
+
+    image_path = Path(output_dir) / "beta_points.png"
+    assert image_path.stat().st_size > 0
+    with Image.open(image_path) as image:
+        image.verify()

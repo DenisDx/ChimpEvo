@@ -112,11 +112,11 @@ aging, and mortality in that order. Births are limited by mature population,
                 "type": "float", "min": -1.0, "max": 1.0,
             },
             "stop_beta_change_threshold": {
-                "description": "Beta stabilization multiplier", "default": 0.1,
+                "description": "Beta stabilization multiplier (used only for auto-stop)", "default": 0.1,
                 "type": "float", "min": 0.0001, "max": 1.0,
             },
             "oldest_death_percent": {
-                "description": "Oldest population share used for death-age statistics", "default": 0.1,
+                "description": "Oldest population share used for death-age statistics (for avg_oldest_death_age calculation)", "default": 0.1,
                 "type": "float", "min": 0.0001, "max": 1.0,
             },
         }
@@ -135,6 +135,7 @@ aging, and mortality in that order. Births are limited by mature population,
         return {
             **Model.add_values(),
             "avg_beta": {"title": "Average beta", "annual": True, "final": True, "format": ".4f"},
+            "beta_variance": {"title": "Beta variance", "annual": True, "final": True, "format": ".6f"},
             "avg_beta_ema": {"title": "Average beta EMA", "annual": True, "final": True, "format": ".4f"},
             "beta_min": {"title": "Minimum beta", "annual": True, "final": True, "format": ".4f"},
             "beta_max": {"title": "Maximum beta", "annual": True, "final": True, "format": ".4f"},
@@ -182,9 +183,13 @@ aging, and mortality in that order. Births are limited by mature population,
             "title": "Beta by Mutation Effect",
             "xlabel": "Mutation effect size",
             "xvalue": "mutation_x",
-            "values": ["avg_beta", "avg_beta_ema"],
-            "labels": ["Average beta", "Average beta EMA"],
+            "values": ["avg_beta"],
+            "values2": ["beta_variance"],
+            "values3": ["avg_age"],
+            "labels": ["Average beta"],
             "animated": True,
+            "data_label": "tag",
+            "style": "points", #could be "lines", "points", "bars"
         }]
 
     @staticmethod
@@ -319,6 +324,7 @@ x_2.0,2.0
         values = super().get_values()
         beta_values = {
             "avg_beta": None,
+            "beta_variance": None,
             "avg_beta_ema": None,
             "beta_min": None,
             "beta_max": None,
@@ -328,12 +334,14 @@ x_2.0,2.0
         }
         if self.get_population_size() > 0:
             betas = self.population[:, self.population_fields["beta"]]
-            average_beta = betas.mean().item()
+            beta_variance, average_beta = torch.var_mean(betas, correction=0)
+            average_beta = average_beta.item()
             average_beta_ema = getattr(self, "avg_beta_ema", None)
             if average_beta_ema is None:
                 average_beta_ema = average_beta
             beta_values = {
                 "avg_beta": average_beta,
+                "beta_variance": beta_variance.item(),
                 "avg_beta_ema": average_beta_ema,
                 "beta_min": betas.min().item(),
                 "beta_max": betas.max().item(),

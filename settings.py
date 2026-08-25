@@ -14,6 +14,7 @@ DEFAULT_SETTINGS = {
     "stat_generation_period": 1,  # collect statistics every N iterations (performance optimization)
     "graph_generation_period": 1,  # generate yearly graphs every N stat collections
     "stop_beta_change_threshold": 0.1,  # multiplier for beta stabilization threshold
+    "min_iterations": 0,  # minimum years before honoring model stop reasons
     "max_iterations": 100000,  # maximum simulation iterations before stopping
     "tag": "default",  # run identifier
     "device": "cuda",  # "cuda" or "cpu"
@@ -38,6 +39,7 @@ PARAMETER_RANGES = {
     "stat_generation_period": (1, 10000),
     "graph_generation_period": (1, 1000),
     "stop_beta_change_threshold": (0.0001, 1.0),
+    "min_iterations": (0, 1000000),
     "max_iterations": (100, 1000000),
 }
 
@@ -57,6 +59,7 @@ PARAMETER_DESCRIPTIONS = {
     "stat_generation_period": "Collect stats every N years",
     "graph_generation_period": "Generate graphs every N stats",
     "stop_beta_change_threshold": "Beta stabilization multiplier",
+    "min_iterations": "Minimum years before model-driven termination",
     "max_iterations": "Maximum simulation years",
     "device": "Compute device (CUDA or CPU)",
     "model": "Dynamic model module",
@@ -83,6 +86,7 @@ PARAMETER_GROUPS = {
         "stat_generation_period",
         "graph_generation_period",
         "stop_beta_change_threshold",
+        "min_iterations",
         "max_iterations",
     ]
 }

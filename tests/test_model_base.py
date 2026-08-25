@@ -151,8 +151,9 @@ def test_model_base_declares_and_returns_beta_scalar_values():
 
     values = model.get_values()
 
-    assert {"avg_beta", "beta_min", "beta_max", "beta_median"} <= set(model.add_values())
+    assert {"avg_beta", "beta_variance", "beta_min", "beta_max", "beta_median"} <= set(model.add_values())
     assert values["avg_beta"] == pytest.approx(0.7 / 3)
+    assert values["beta_variance"] == pytest.approx(0.0155555556)
     assert values["beta_min"] == pytest.approx(0.10)
     assert values["beta_max"] == pytest.approx(0.40)
     assert values["beta_median"] == pytest.approx(0.20)
@@ -168,9 +169,19 @@ def test_model_base_returns_none_for_empty_beta_aggregates():
     values = model.get_values()
 
     assert values["avg_beta"] is None
+    assert values["beta_variance"] is None
     assert values["beta_min"] is None
     assert values["beta_max"] is None
     assert values["beta_median"] is None
+
+
+@pytest.mark.smoke
+def test_model_base_singleton_beta_variance_is_zero():
+    """Use population variance semantics without a singleton NaN."""
+    model = Model_base(make_settings(), torch.device("cpu"))
+    model._set_population(torch.tensor([[2.0, 0.25]]))
+
+    assert model.get_values()["beta_variance"] == pytest.approx(0.0)
 
 
 @pytest.mark.smoke

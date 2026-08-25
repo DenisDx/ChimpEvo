@@ -17,6 +17,7 @@ matplotlib.use('Agg')  # Use non-GUI backend to avoid thread conflicts with tkin
 import matplotlib.pyplot as plt
 from PIL import Image
 import gc
+from graph_style import render_series
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 from load_model import load_model_class
 from metadata import validate_model_metadata
@@ -28,6 +29,7 @@ _logger_callback = None
 CORE_RUNTIME_SETTINGS = (
     "stat_generation_period",
     "graph_generation_period",
+    "min_iterations",
     "max_iterations",
 )
 
@@ -64,6 +66,7 @@ def validate_runtime_config(settings, model_class=None):
     """Return model metadata after strict runtime configuration validation."""
     if not isinstance(settings, dict):
         raise TypeError("Configuration must be a JSON object")
+    settings.setdefault("min_iterations", DEFAULT_SETTINGS["min_iterations"])
     for name in ("model", "tag", "device", *CORE_RUNTIME_SETTINGS):
         if name not in settings:
             raise ValueError(f"Missing required setting: {name}")
@@ -110,6 +113,8 @@ def validate_runtime_config(settings, model_class=None):
             raise ValueError(f"{name} must be <= {declaration['max']}")
     if settings.get("initial_population", 0) > settings.get("max_population", float("inf")):
         raise ValueError("initial_population must not exceed max_population")
+    if settings["min_iterations"] > settings["max_iterations"]:
+        raise ValueError("min_iterations must not exceed max_iterations")
     return model_metadata
 
 
@@ -247,6 +252,12 @@ class PopulationSimulation:
             return True
         return False
 
+    def _annotate_tag(self, fig):
+        """Stamp the current run tag in a saved figure's top-right corner."""
+        tag = self.settings.get("tag")
+        if tag:
+            fig.text(0.99, 0.99, tag, ha="right", va="top", fontsize=9, color="gray", alpha=0.8)
+
     def _save_distribution_graph(self, year):
         """Save per-year age distribution graph as bar chart
 
@@ -255,7 +266,6 @@ class PopulationSimulation:
         """
         if not self.has_age_field or self.model.get_population_size() == 0:
             return
-
         ages = self.model.get_ages().astype(int)
         ages = ages[ages > 0]
         if len(ages) == 0:
@@ -280,6 +290,7 @@ class PopulationSimulation:
 
         distribution_file = self.output_dir / f"distribution{year}.png"
         fig.tight_layout()
+        self._annotate_tag(fig)
         fig.savefig(distribution_file, dpi=100, bbox_inches="tight")
         plt.close(fig)
         del fig, ax
@@ -360,6 +371,7 @@ class PopulationSimulation:
 
         survivorship_file = self.output_dir / f"survivorship{year}.png"
         fig.tight_layout()
+        self._annotate_tag(fig)
         fig.savefig(survivorship_file, dpi=100, bbox_inches="tight")
         plt.close(fig)
         del fig, ax
@@ -422,6 +434,7 @@ class PopulationSimulation:
 
         beta_file = self.output_dir / f"betaoccurrence{year}.png"
         fig.tight_layout()
+        self._annotate_tag(fig)
         fig.savefig(beta_file, dpi=100, bbox_inches="tight")
         plt.close(fig)
         del fig, ax
@@ -451,27 +464,45 @@ class PopulationSimulation:
                     self._save_model_distribution_graph(graph, output_path)
 
     def _save_model_time_graph(self, graph, output_path):
-        """Render declared scalar histories to one time graph."""
+        """Render declared scalar histories to one time graph (lines/points/bars)."""
         fig, ax = plt.subplots(figsize=(10, 6))
-        for value_name, label in zip(graph["values"], graph["labels"]):
+        style = graph["style"]
+        values2 = graph.get("values2")
+        values3 = graph.get("values3")
+        for index, (value_name, label) in enumerate(zip(graph["values"], graph["labels"])):
+            size_name = values2[index] if values2 else None
+            color_name = values3[index] if values3 else None
             points = [
-                (row["year"], row.get(value_name))
+                (
+                    row["year"],
+                    row[value_name],
+                    row.get(size_name) if size_name else None,
+                    row.get(color_name) if color_name else None,
+                )
                 for row in self.results
                 if row.get(value_name) is not None
+                and (size_name is None or row.get(size_name) is not None)
+                and (color_name is None or row.get(color_name) is not None)
             ]
-            if points:
-                ax.plot(
-                    [point[0] for point in points],
-                    [point[1] for point in points],
-                    linewidth=2,
-                    label=label,
-                )
+            if not points:
+                continue
+            render_series(
+                ax,
+                [point[0] for point in points],
+                [point[1] for point in points],
+                label,
+                style,
+                size_values=[point[2] for point in points] if size_name else None,
+                color_values=[point[3] for point in points] if color_name else None,
+                max_point_size=graph["max_point_size"],
+            )
         ax.set_xlabel(graph["xlabel"] or "Year")
         ax.set_title(graph["title"])
         if len(graph["values"]) > 1:
             ax.legend()
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        self._annotate_tag(fig)
         fig.savefig(output_path, dpi=100, bbox_inches="tight")
         plt.close(fig)
 
@@ -500,6 +531,7 @@ class PopulationSimulation:
             ax.legend()
         ax.grid(True, alpha=0.3)
         fig.tight_layout()
+        self._annotate_tag(fig)
         fig.savefig(output_path, dpi=100, bbox_inches="tight")
         plt.close(fig)
 
@@ -557,8 +589,13 @@ class PopulationSimulation:
         # Step 3: Mortality (stochastic death)
         deaths = self.model.apply_mortality()
         model_stop_reason = self.model.should_stop()
+        completed_iterations = self.year + 1
+        min_iterations = int(self.settings.get("min_iterations", 0))
+        effective_stop_reason = (
+            model_stop_reason if completed_iterations >= min_iterations else None
+        )
         if should_finalize is not None and should_finalize():
-            model_stop_reason = model_stop_reason or "finalization requested"
+            effective_stop_reason = effective_stop_reason or "finalization requested"
         
         # Determine if we should collect statistics this year
         stat_period = int(self.settings.get("stat_generation_period", 1))
@@ -569,7 +606,7 @@ class PopulationSimulation:
         reaches_max_iterations = self.year + 1 >= max_iterations
         should_collect_stats = (
             self.year % stat_period == 0
-            or bool(model_stop_reason)
+            or bool(effective_stop_reason)
             or reaches_max_iterations
         )
         
@@ -602,7 +639,7 @@ class PopulationSimulation:
         
         self.year += 1
 
-        if self._should_stop(model_stop_reason):
+        if self._should_stop(effective_stop_reason):
             return False
         
         return True
@@ -739,6 +776,7 @@ class PopulationSimulation:
         
         plt.tight_layout()
         graph_file = output_dir / "results_summary.png"
+        self._annotate_tag(fig)
         plt.savefig(graph_file, dpi=100, bbox_inches="tight")
         log(f"Saved graph to {graph_file}")
         plt.close()

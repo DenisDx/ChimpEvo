@@ -2,17 +2,19 @@
 
 from copy import deepcopy
 
+from graph_style import GRAPH_STYLES
+
 
 SETTING_KEYS = {"description", "default", "type", "min", "max"}
 VALUE_KEYS = {"title", "description", "annual", "final", "format"}
 GRAPH_KEYS = {
     "filename", "values", "type", "title", "description", "annual", "final",
     "xlabel", "labels", "animated", "min", "max", "padding_min", "padding_max",
-    "scale", "bin_count",
+    "scale", "bin_count", "style", "values2", "values3", "max_point_size",
 }
 METAGRAPH_KEYS = {
     "filename", "values", "title", "description", "xlabel", "xvalue", "labels",
-    "animated",
+    "animated", "data_label", "style", "values2", "values3", "max_point_size",
 }
 SETTING_TYPES = {"int": int, "float": float, "str": str, "bool": bool}
 
@@ -26,6 +28,35 @@ def _reject_unknown_keys(metadata, allowed_keys, path):
     unknown_keys = set(metadata) - allowed_keys
     if unknown_keys:
         raise ModelMetadataError(f"{path} contains unknown keys: {sorted(unknown_keys)}")
+
+
+def _normalize_style_fields(metadata, graph_values, source_names, path):
+    """Validate and normalize optional style/values2/values3/max_point_size keys."""
+    style = metadata.get("style", "lines")
+    if style not in GRAPH_STYLES:
+        raise ModelMetadataError(f"{path}.style must be one of {sorted(GRAPH_STYLES)}")
+    result = {"style": style}
+    for key in ("values2", "values3"):
+        series = metadata.get(key)
+        if series is None:
+            continue
+        if not isinstance(series, list) or len(series) != len(graph_values) or not all(
+            isinstance(name, str) and name for name in series
+        ):
+            raise ModelMetadataError(f"{path}.{key} must match values")
+        missing_names = [name for name in series if name not in source_names]
+        if missing_names:
+            raise ModelMetadataError(f"{path}.{key} references missing names: {missing_names}")
+        result[key] = list(series)
+    max_point_size = metadata.get("max_point_size", 200)
+    if (
+        not isinstance(max_point_size, (int, float))
+        or isinstance(max_point_size, bool)
+        or max_point_size <= 2
+    ):
+        raise ModelMetadataError(f"{path}.max_point_size must be a number greater than 2")
+    result["max_point_size"] = float(max_point_size)
+    return result
 
 
 def _require_named_dict(value, method_name):
@@ -150,6 +181,10 @@ def _normalize_graphs(model_class, values):
         missing_names = [name for name in graph_values if name not in source_names]
         if missing_names:
             raise ModelMetadataError(f"{path}.values references missing names: {missing_names}")
+        style_keys = ("style", "values2", "values3", "max_point_size")
+        if graph_type == "distr" and any(key in metadata for key in style_keys):
+            raise ModelMetadataError(f"{path} style options are only supported for time graphs")
+        style_fields = _normalize_style_fields(metadata, graph_values, source_names, path)
 
         annual = metadata.get("annual", True)
         final = metadata.get("final", False)
@@ -193,6 +228,7 @@ def _normalize_graphs(model_class, values):
             "scale": float(scale),
             "padding_min": float(padding_min),
             "padding_max": float(padding_max),
+            **style_fields,
         }
         if minimum is not None:
             result["min"] = minimum
@@ -235,11 +271,15 @@ def _normalize_metagraphs(model_class, settings, values):
             raise ModelMetadataError(f"{path}.xvalue must be a non-empty string")
         if xvalue is not None and xvalue not in settings and xvalue not in values:
             raise ModelMetadataError(f"{path}.xvalue references missing name: {xvalue}")
+        data_label = metadata.get("data_label")
+        if data_label is not None and data_label != "tag":
+            raise ModelMetadataError(f"{path}.data_label currently only supports \"tag\"")
         labels = metadata.get("labels", list(graph_values))
         if not isinstance(labels, list) or len(labels) != len(graph_values) or not all(
             isinstance(label, str) for label in labels
         ):
             raise ModelMetadataError(f"{path}.labels must match values")
+        style_fields = _normalize_style_fields(metadata, graph_values, values, path)
         result = {
             "filename": filename,
             "values": list(graph_values),
@@ -248,9 +288,12 @@ def _normalize_metagraphs(model_class, settings, values):
             "xlabel": metadata.get("xlabel", ""),
             "labels": list(labels),
             "animated": metadata.get("animated", True),
+            **style_fields,
         }
         if xvalue is not None:
             result["xvalue"] = xvalue
+        if data_label is not None:
+            result["data_label"] = data_label
         for text_key in ("title", "description", "xlabel"):
             if not isinstance(result[text_key], str):
                 raise ModelMetadataError(f"{path}.{text_key} must be a string")

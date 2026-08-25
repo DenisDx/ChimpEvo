@@ -31,11 +31,47 @@ def set_single_result(simulation):
         "dead": 0,
         "prop_aging": 0.0,
         "avg_beta": 0.11,
+        "beta_variance": 0.000025,
         "avg_beta_ema": 0.11,
         "beta_min": 0.11,
         "beta_max": 0.12,
         "beta_median": 0.115,
     }]
+
+
+@pytest.mark.smoke
+def test_annotate_tag_stamps_figure_top_right_corner(tmp_path, monkeypatch):
+    """Stamp the current run tag in a saved figure's top-right corner."""
+    import matplotlib.pyplot as plt
+
+    monkeypatch.chdir(tmp_path)
+    simulation = PopulationSimulation(make_settings(tag="stamped_tag"))
+    fig, ax = plt.subplots()
+
+    simulation._annotate_tag(fig)
+
+    assert len(fig.texts) == 1
+    stamped_text = fig.texts[0]
+    assert stamped_text.get_text() == "stamped_tag"
+    assert stamped_text.get_ha() == "right"
+    assert stamped_text.get_va() == "top"
+    plt.close(fig)
+
+
+@pytest.mark.smoke
+def test_annotate_tag_skips_empty_tag(tmp_path, monkeypatch):
+    """Add no figure text when the current tag is empty."""
+    import matplotlib.pyplot as plt
+
+    monkeypatch.chdir(tmp_path)
+    simulation = PopulationSimulation(make_settings())
+    simulation.settings["tag"] = ""
+    fig, ax = plt.subplots()
+
+    simulation._annotate_tag(fig)
+
+    assert fig.texts == []
+    plt.close(fig)
 
 
 @pytest.mark.smoke
@@ -99,7 +135,7 @@ def test_successful_export_always_writes_final_csv(tmp_path, monkeypatch):
         rows = list(reader)
     assert reader.fieldnames == [
         "model", "tag", "year", "duration_seconds",
-        "count", "avg_age", "avg_beta", "avg_beta_ema",
+        "count", "avg_age", "avg_beta", "beta_variance", "avg_beta_ema",
             "beta_min", "beta_max", "beta_median",
             "avg_oldest_death_age", "avg_years_not_lived",
     ]

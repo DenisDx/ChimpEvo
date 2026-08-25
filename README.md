@@ -144,7 +144,7 @@ Opens a window where you can:
 - Create, clone, switch, and confirm deletion of experiments stored under `data/<experiment>/`. Cloning copies the saved `config.json` and optional `multi.csv` byte for byte, can optionally copy the current non-empty `result/` directory, excludes result backup archives, and activates the completed clone.
 - Edit all simulation parameters with real-time validation (organized in Settings tab)
 - Select CPU or CUDA accelerated computation
-- Start/stop simulations (automatically opens the non-modal Progress window on start)
+- Start/stop simulations (opens the non-modal Progress window once at calculation start)
 - View live statistics, logs, and generated graphs
 - Save/load configurations from JSON files
 
@@ -152,7 +152,7 @@ The main GUI features two tabs:
 1. **Settings**: Parameter input fields, device selection, save/load config
 2. **Batch**: Editable batch CSV, aggregate progress, Start/Stop controls, and result cleanup
 
-The separate non-modal **Progress** window contains current-run tag/source details, real-time logs, performance statistics, legacy graphs, model-declared graph tabs, and calculation controls. **Stop Simulation** cancels and keeps partial output. **Finalize Simulation** completes the current simulation successfully at the end of its current year and writes final outputs. During batch execution, finalizing completes the current row and then stops the batch before the next row. Batch runs show the complete active CSV row; single runs show `Default config`. Use **Show Progress Window** to open it at any time. **Auto-scroll log** controls whether new messages move the log to its end. Closing Progress hides it without interrupting a calculation or discarding its current display.
+The separate non-modal **Progress** window contains current-run tag/source details, real-time logs, performance statistics, legacy graphs, model-declared graph tabs, and calculation controls. **Stop Simulation** cancels and keeps partial output. **Finalize Simulation** completes the current simulation successfully at the end of its current year and writes final outputs. During batch execution, finalizing completes the current row and then stops the batch before the next row. Progress opens once at single or batch launch; later batch rows and graph updates do not raise or reopen it after it is hidden. Batch runs show the complete active CSV row; single runs show `Default config`. Use **Show Progress Window** to open it at any time. **Auto-scroll log** controls whether new messages move the log to its end. Closing Progress hides it without interrupting a calculation or discarding its current display.
 
 The Settings tab contains the simulation and configuration actions and can load a selected model or all active model defaults into memory. **About Model...** opens the selected model's structured description in a modal window. Hover hints briefly explain buttons, configuration fields using their declared descriptions, and state indicators. Separate top-panel indicators show config and batch dirty state in blue. Switching experiments offers save, discard, or cancel when either editor has unsaved changes and identifies the experiment being left.
 
@@ -164,9 +164,9 @@ On first launch, the GUI opens a New Experiment form with an experiment-name fie
 python main.py
 ```
 
-Runs one simulation using `data/<experiment>/config.json`, where `<experiment>` is selected by `default.conf`. Missing or invalid experiment selection is an error. Outputs results to `data/<experiment>/result/[tag]/`:
-- `result.csv` — model-declared annual statistics
-- `final.csv` — core run metadata and model-declared final values after successful completion
+Runs one simulation using `data/<experiment>/config.json`, where `<experiment>` is selected by `default.conf`. Missing or invalid experiment selection is an error. Every saved graph is stamped with the current run's tag in its top-right corner. Outputs results to `data/<experiment>/result/[tag]/`:
+- `result.csv` — model-declared annual statistics; beta models include population variance as `beta_variance`
+- `final.csv` — core run metadata and model-declared final values, including `beta_variance` for beta models, after successful completion
 - `age_distribution_0000005.png` — dynamic annual graph frame with a seven-digit year suffix
 - `age_distribution.png` — dynamic final graph after successful completion
 - `age_distribution.gif` — animation assembled from retained numbered frames after successful completion
@@ -183,6 +183,8 @@ Runs one simulation using `data/<experiment>/config.json`, where `<experiment>` 
   - Genetic Parameter Beta Evolution  
   - Birth/Death Event Counts
 
+Every saved graph (annual frames, final graphs, and `results_summary.png`) is stamped with the current run's tag in its top-right corner.
+
 ### 3. Batch Processing (Parameter Sweeps)
 
 ```bash
@@ -194,10 +196,12 @@ Executes multiple simulations with parameter variants:
 - **multi.csv** contains a required first `tag` column and may override `model` or other settings per row.
 - Each row is resolved and validated before any calculation starts. Missing, incorrectly typed, or out-of-range required settings are errors.
 - Results are saved to `data/<experiment>/result/[tag_from_csv]/`.
-- Successful rows append their final values to authoritative `data/<experiment>/result/result.csv`; a later batch run resumes only when the tag's full resolved configuration signature is unchanged.
+- Successful rows append their final values to authoritative `data/<experiment>/result/result.csv`; a later batch run skips completed tags whose full resolved configuration signature is unchanged.
 - Each aggregate row stores original CSV cells as `input_*`, all resolved settings, and every field from that run's `final.csv`.
-- Batch tags and parameter rows must be unique. Existing aggregate rows must retain matching successful `final.csv` files and the same resolved configuration for each tag.
+- Batch tags must be unique. Identical raw parameter rows with different tags produce a CLI warning and continue; GUI Save or Run asks for OK/Cancel confirmation listing the affected tags. If a completed tag's resolved configuration changed, CLI warns and recalculates it, while GUI shows a scrollable list of changed old/new values (capped at 75% of the screen height) with three choices: **Delete old results** archives the previous tag directory and recalculates it; **Keep old results** leaves the previous results and aggregate row untouched and skips recalculation for that tag; **Cancel** aborts the launch entirely. Existing aggregate rows must retain matching successful `final.csv` files.
 - GIF movies and metagraphs rebuild from active CSV tags without recalculating completed rows. Mixed-model artifacts are separated under `result/_models/<model>/`.
+- A metagraph's optional `data_label` (currently only `"tag"` is supported) labels every plotted point in small text to its right with that row's tag.
+- Declared time graphs and metagraphs support an optional `style`: `"lines"` (default, unchanged), `"points"`, or `"bars"`. With `"points"`, optional `values2`/`values3` (one name per `values` entry) size each point from 2px up to `max_point_size` (default 200) and color it along a red-to-blue rainbow scale.
 - The GUI Batch tab edits `multi.csv` in memory and writes it only with **Save Batch**.
 - Optional batch columns can include `model`; **Delete Column** removes a selected optional column but never the required `tag` column.
 - **Start Batch** runs all rows; **Run Selected Row** runs one saved row after full CSV validation. Both require saved config and batch state.
@@ -237,6 +241,7 @@ The GUI's **Load Config** accepts a JSON object and prepares it in unsaved GUI m
   "mutation_s": 0.0,
   "graph_generation_period": 1,
   "stop_beta_change_threshold": 0.1,
+  "min_iterations": 0,
   "max_iterations": 100000,
   "tag": "default",
   "device": "cuda"
@@ -261,6 +266,7 @@ The GUI's **Load Config** accepts a JSON object and prepares it in unsaved GUI m
 | oldest_death_percent | float | 0.1 | (0, 1] | Oldest population share used for the death-age metric |
 | graph_generation_period | int | 1 | [1, 1000] | Generate yearly `distributionN/survivorshipN/betaoccurrenceN` graphs every N iterations |
 | stop_beta_change_threshold | float | 0.1 | [0.01, 1.0] | Multiplier for β stabilization threshold (change < avg_first_10_years * multiplier) |
+| min_iterations | int | 0 | [0, 1000000] | Minimum completed years before honoring model-driven termination; extinction, cancellation, finalization, and max iterations remain immediate |
 | max_iterations | int | 100000 | [100, 1000000] | Maximum simulation years before termination |
 | tag | string | "default" | — | Run identifier (output directory name) |
 | device | string | "cuda" | {cuda, cpu} | Compute device (auto-selects CPU if CUDA unavailable) |

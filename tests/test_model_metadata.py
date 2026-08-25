@@ -69,13 +69,18 @@ def test_model_base_declares_beta_distribution_and_time_graphs():
 
 @pytest.mark.smoke
 def test_model_base_declares_beta_mutation_metagraph():
-    """Expose final beta lines over the model's default batch sweep setting."""
+    """Expose a beta-by-mutation points plot sized/colored by declared scalars."""
     metagraph = validate_model_metadata(Model_base)["metagraphs"][0]
 
     assert metagraph["filename"] == "beta_by_mutation"
     assert metagraph["xvalue"] == "mutation_x"
-    assert metagraph["values"] == ["avg_beta", "avg_beta_ema"]
+    assert metagraph["values"] == ["avg_beta"]
+    assert metagraph["values2"] == ["beta_variance"]
+    assert metagraph["values3"] == ["avg_age"]
+    assert metagraph["style"] == "points"
+    assert metagraph["max_point_size"] == 200.0
     assert metagraph["animated"] is True
+    assert metagraph["data_label"] == "tag"
 
 
 @pytest.mark.smoke
@@ -117,6 +122,36 @@ def test_graph_metadata_normalizes_defaults_and_references():
         ("add_metagraphs", [{"filename": "x", "values": ["missing"]}], "missing"),
         ("add_metagraphs", [{"filename": "x", "values": ["count"], "labels": []}], "labels"),
         ("add_metagraphs", [{"filename": "x", "values": ["count"], "unknown": True}], "unknown"),
+        (
+            "add_metagraphs",
+            [{"filename": "x", "values": ["count"], "data_label": "missing"}],
+            "data_label",
+        ),
+        (
+            "add_metagraphs",
+            [{"filename": "x", "values": ["count"], "style": "pie"}],
+            "style",
+        ),
+        (
+            "add_metagraphs",
+            [{"filename": "x", "values": ["count"], "values2": ["count", "count"]}],
+            "values2",
+        ),
+        (
+            "add_metagraphs",
+            [{"filename": "x", "values": ["count"], "values2": ["missing"]}],
+            "values2",
+        ),
+        (
+            "add_metagraphs",
+            [{"filename": "x", "values": ["count"], "max_point_size": 1}],
+            "max_point_size",
+        ),
+        (
+            "add_graphs",
+            [{"filename": "x", "type": "distr", "values": ["age"], "style": "points"}],
+            "style options are only supported for time graphs",
+        ),
     ],
 )
 def test_metadata_rejects_invalid_declarations(method_name, declaration, message):
