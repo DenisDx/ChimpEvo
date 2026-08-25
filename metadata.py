@@ -263,7 +263,7 @@ def _normalize_metagraphs(model_class, settings, values):
             isinstance(name, str) and name for name in graph_values
         ):
             raise ModelMetadataError(f"{path}.values must be a non-empty list of names")
-        missing_names = [name for name in graph_values if name not in values]
+        missing_names = [name for name in graph_values if name not in values and name not in settings]
         if missing_names:
             raise ModelMetadataError(f"{path}.values references missing names: {missing_names}")
         xvalue = metadata.get("xvalue")
@@ -279,7 +279,7 @@ def _normalize_metagraphs(model_class, settings, values):
             isinstance(label, str) for label in labels
         ):
             raise ModelMetadataError(f"{path}.labels must match values")
-        style_fields = _normalize_style_fields(metadata, graph_values, values, path)
+        style_fields = _normalize_style_fields(metadata, graph_values, set(settings) | set(values), path)
         result = {
             "filename": filename,
             "values": list(graph_values),

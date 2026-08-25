@@ -84,6 +84,19 @@ def test_model_base_declares_beta_mutation_metagraph():
 
 
 @pytest.mark.smoke
+def test_model_base_declares_beta_factors_metagraph_using_settings_names():
+    """Allow metagraph values/values2/values3 to reference resolved settings."""
+    metagraph = validate_model_metadata(Model_base)["metagraphs"][1]
+
+    assert metagraph["filename"] == "beta_factors"
+    assert metagraph["xvalue"] == "avg_beta"
+    assert metagraph["values"] == ["lambda"]
+    assert metagraph["values2"] == ["mutation_probability"]
+    assert metagraph["values3"] == ["mutation_x"]
+    assert metagraph["style"] == "points"
+
+
+@pytest.mark.smoke
 def test_graph_metadata_normalizes_defaults_and_references():
     """Normalize graph defaults and validate scalar and field references."""
 
@@ -106,6 +119,41 @@ def test_graph_metadata_normalizes_defaults_and_references():
     assert graphs[1]["type"] == "distr"
     assert graphs[1]["bin_count"] == 25
     assert graphs[1]["scale"] == 1.0
+
+
+@pytest.mark.smoke
+def test_metagraph_values_may_reference_a_setting_name():
+    """Allow metagraph values/values2/values3 to reference a declared setting."""
+
+    class SettingMetagraphModel(Model):
+        """Declare one metagraph plotting a setting instead of a computed value."""
+
+        @staticmethod
+        def add_settings():
+            """Return one declared numeric setting."""
+            return {
+                **Model.add_settings(),
+                "growth_rate": {
+                    "description": "growth rate", "default": 1.0, "type": "float", "min": 0.0, "max": 10.0,
+                },
+            }
+
+        @staticmethod
+        def add_metagraphs():
+            """Return one metagraph whose series references a setting name."""
+            return [{
+                "filename": "growth_by_count",
+                "values": ["growth_rate"],
+                "values2": ["growth_rate"],
+                "values3": ["growth_rate"],
+                "style": "points",
+            }]
+
+    metagraph = validate_model_metadata(SettingMetagraphModel)["metagraphs"][0]
+
+    assert metagraph["values"] == ["growth_rate"]
+    assert metagraph["values2"] == ["growth_rate"]
+    assert metagraph["values3"] == ["growth_rate"]
 
 
 @pytest.mark.smoke

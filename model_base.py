@@ -190,7 +190,21 @@ aging, and mortality in that order. Births are limited by mature population,
             "animated": True,
             "data_label": "tag",
             "style": "points", #could be "lines", "points", "bars"
-        }]
+        },
+        {
+            "filename": "beta_factors",
+            "title": "Beta dependency on lambda, P mutation, mutation_x",
+            "xlabel": "Beta factor",
+            "xvalue": "avg_beta",
+            "values": ["lambda"],
+            "values2": ["mutation_probability"],
+            "values3": ["mutation_x"],
+            "labels": ["Lambda"],
+            "animated": True,
+            "data_label": "tag",
+            "style": "points", #could be "lines", "points", "bars"
+        }
+        ]
 
     @staticmethod
     def add_batch():
