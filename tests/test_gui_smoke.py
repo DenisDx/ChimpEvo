@@ -215,6 +215,16 @@ def test_gui_constructs_and_updates_valid_settings(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_update_from_ui_does_not_mark_dirty_without_edits(gui_app):
+    """Reading unchanged controls back must never mark the configuration dirty."""
+    assert gui_app.is_config_dirty is False
+
+    gui_app._update_config_from_ui()
+
+    assert gui_app.is_config_dirty is False
+
+
+@pytest.mark.smoke
 def test_gui_uses_persistent_non_modal_progress_window(gui_app):
     """Keep Progress outside the main tabs and preserve it across show and hide actions."""
     assert "Progress" not in [gui_app.notebook.tab(tab_id, "text") for tab_id in gui_app.notebook.tabs()]

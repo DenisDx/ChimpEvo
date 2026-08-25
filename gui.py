@@ -2248,6 +2248,7 @@ class SimulationGUI:
             # Force CPU selection in UI when CUDA backend is unavailable.
             if requested_device == "cuda" and not torch.cuda.is_available():
                 requested_device = "cpu"
+            self.config["device"] = requested_device
             self.device_var.set(requested_device)
             self.tag_var.set(self.config.get("tag", DEFAULT_SETTINGS["tag"]))
             for param, var in self.setting_vars.items():
