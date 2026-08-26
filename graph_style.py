@@ -3,6 +3,14 @@
 GRAPH_STYLES = {"lines", "points", "bars"}
 
 
+def clamp_values(values, bounds):
+    """Clamp numeric values to an optional inclusive range."""
+    if bounds is None:
+        return list(values)
+    lower, upper = bounds
+    return [min(upper, max(lower, value)) for value in values]
+
+
 def render_series(
     ax,
     x_values,
@@ -13,6 +21,8 @@ def render_series(
     color_values=None,
     max_point_size=200.0,
     marker=None,
+    size_range=None,
+    color_range=None,
 ):
     """Plot one named series as lines (default), points, or bars.
 
@@ -28,8 +38,12 @@ def render_series(
         ax.scatter(
             x_values,
             y_values,
-            s=_scale_point_sizes(size_values, max_point_size),
-            c=color_values,
+            s=(
+                _scale_point_sizes(clamp_values(size_values, size_range), max_point_size)
+                if size_values is not None
+                else None
+            ),
+            c=clamp_values(color_values, color_range) if color_values is not None else None,
             cmap="rainbow_r" if color_values is not None else None,
             label=label,
         )

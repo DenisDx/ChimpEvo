@@ -11,10 +11,12 @@ GRAPH_KEYS = {
     "filename", "values", "type", "title", "description", "annual", "final",
     "xlabel", "labels", "animated", "min", "max", "padding_min", "padding_max",
     "scale", "bin_count", "style", "values2", "values3", "max_point_size",
+    "last", "filter", "range",
 }
 METAGRAPH_KEYS = {
     "filename", "values", "title", "description", "xlabel", "xvalue", "labels",
     "animated", "data_label", "style", "values2", "values3", "max_point_size",
+    "last", "filter", "range",
 }
 SETTING_TYPES = {"int": int, "float": float, "str": str, "bool": bool}
 
@@ -57,6 +59,35 @@ def _normalize_style_fields(metadata, graph_values, source_names, path):
         raise ModelMetadataError(f"{path}.max_point_size must be a number greater than 2")
     result["max_point_size"] = float(max_point_size)
     return result
+
+
+def _normalize_plot_options(metadata, source_names, path):
+    """Validate optional last, filter, and range plot controls."""
+    last = metadata.get("last", False)
+    if not isinstance(last, bool):
+        raise ModelMetadataError(f"{path}.last must be bool")
+
+    normalized = {"last": last, "filter": {}, "range": {}}
+    for option_name in ("filter", "range"):
+        option = metadata.get(option_name, {})
+        if not isinstance(option, dict):
+            raise ModelMetadataError(f"{path}.{option_name} must be a dict")
+        for field_name, bounds in option.items():
+            if field_name not in source_names and field_name != "year":
+                raise ModelMetadataError(
+                    f"{path}.{option_name} references missing name: {field_name}"
+                )
+            if (
+                not isinstance(bounds, (list, tuple))
+                or len(bounds) != 2
+                or any(isinstance(value, bool) or not isinstance(value, (int, float)) for value in bounds)
+                or bounds[0] > bounds[1]
+            ):
+                raise ModelMetadataError(
+                    f"{path}.{option_name}.{field_name} must be [min, max] with min <= max"
+                )
+            normalized[option_name][field_name] = [float(bounds[0]), float(bounds[1])]
+    return normalized
 
 
 def _require_named_dict(value, method_name):
@@ -185,6 +216,7 @@ def _normalize_graphs(model_class, values):
         if graph_type == "distr" and any(key in metadata for key in style_keys):
             raise ModelMetadataError(f"{path} style options are only supported for time graphs")
         style_fields = _normalize_style_fields(metadata, graph_values, source_names, path)
+        plot_options = _normalize_plot_options(metadata, source_names, path)
 
         annual = metadata.get("annual", True)
         final = metadata.get("final", False)
@@ -229,6 +261,7 @@ def _normalize_graphs(model_class, values):
             "padding_min": float(padding_min),
             "padding_max": float(padding_max),
             **style_fields,
+            **plot_options,
         }
         if minimum is not None:
             result["min"] = minimum
@@ -280,6 +313,7 @@ def _normalize_metagraphs(model_class, settings, values):
         ):
             raise ModelMetadataError(f"{path}.labels must match values")
         style_fields = _normalize_style_fields(metadata, graph_values, set(settings) | set(values), path)
+        plot_options = _normalize_plot_options(metadata, set(settings) | set(values), path)
         result = {
             "filename": filename,
             "values": list(graph_values),
@@ -289,6 +323,7 @@ def _normalize_metagraphs(model_class, settings, values):
             "labels": list(labels),
             "animated": metadata.get("animated", True),
             **style_fields,
+            **plot_options,
         }
         if xvalue is not None:
             result["xvalue"] = xvalue

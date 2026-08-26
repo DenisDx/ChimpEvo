@@ -97,6 +97,19 @@ def test_model_base_declares_beta_factors_metagraph_using_settings_names():
 
 
 @pytest.mark.smoke
+def test_model_base_declares_filtered_ranged_last_metagraph():
+    """Normalize the optional last, filter, and range metagraph controls."""
+    metagraph = validate_model_metadata(Model_base)["metagraphs"][2]
+
+    assert metagraph["last"] is True
+    assert metagraph["filter"] == {
+        "lambda": [0.01, 0.05],
+        "mutation_probability": [0.05, 0.15],
+    }
+    assert metagraph["range"] == {"avg_beta": [0.0, 0.25]}
+
+
+@pytest.mark.smoke
 def test_graph_metadata_normalizes_defaults_and_references():
     """Normalize graph defaults and validate scalar and field references."""
 
@@ -116,6 +129,9 @@ def test_graph_metadata_normalizes_defaults_and_references():
     assert graphs[0]["type"] == "time"
     assert graphs[0]["labels"] == ["count"]
     assert graphs[0]["animated"] is True
+    assert graphs[0]["last"] is False
+    assert graphs[0]["filter"] == {}
+    assert graphs[0]["range"] == {}
     assert graphs[1]["type"] == "distr"
     assert graphs[1]["bin_count"] == 25
     assert graphs[1]["scale"] == 1.0

@@ -17,7 +17,7 @@ matplotlib.use('Agg')  # Use non-GUI backend to avoid thread conflicts with tkin
 import matplotlib.pyplot as plt
 from PIL import Image
 import gc
-from graph_style import render_series
+from graph_style import clamp_values, render_series
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 from load_model import load_model_class
 from metadata import validate_model_metadata
@@ -455,7 +455,9 @@ class PopulationSimulation:
         """Render model-declared graphs for one requested output stage."""
         target_dir = Path(output_dir) if output_dir is not None else self.output_dir
         for graph in self.model_metadata["graphs"]:
-            if (annual and graph["annual"]) or (final and graph["final"]):
+            annual_output = annual and graph["annual"] and not graph["last"]
+            final_output = final and (graph["final"] or graph["last"])
+            if annual_output or final_output:
                 suffix = f"_{int(year):07d}" if annual else ""
                 output_path = target_dir / f"{graph['filename']}{suffix}.png"
                 if graph["type"] == "time":
@@ -469,6 +471,22 @@ class PopulationSimulation:
         style = graph["style"]
         values2 = graph.get("values2")
         values3 = graph.get("values3")
+        plot_filter = graph["filter"]
+        plot_range = graph["range"]
+
+        def row_passes_filter(row):
+            """Return whether one stored statistic row passes all graph filters."""
+            for field_name, bounds in plot_filter.items():
+                value = row.get(field_name)
+                try:
+                    value = float(value)
+                except (TypeError, ValueError):
+                    return False
+                if not bounds[0] <= value <= bounds[1]:
+                    return False
+            return True
+
+        filtered_results = [row for row in self.results if row_passes_filter(row)]
         for index, (value_name, label) in enumerate(zip(graph["values"], graph["labels"])):
             size_name = values2[index] if values2 else None
             color_name = values3[index] if values3 else None
@@ -479,7 +497,7 @@ class PopulationSimulation:
                     row.get(size_name) if size_name else None,
                     row.get(color_name) if color_name else None,
                 )
-                for row in self.results
+                for row in filtered_results
                 if row.get(value_name) is not None
                 and (size_name is None or row.get(size_name) is not None)
                 and (color_name is None or row.get(color_name) is not None)
@@ -488,19 +506,27 @@ class PopulationSimulation:
                 continue
             render_series(
                 ax,
-                [point[0] for point in points],
-                [point[1] for point in points],
+                clamp_values([point[0] for point in points], plot_range.get("year")),
+                clamp_values([point[1] for point in points], plot_range.get(value_name)),
                 label,
                 style,
                 size_values=[point[2] for point in points] if size_name else None,
                 color_values=[point[3] for point in points] if color_name else None,
                 max_point_size=graph["max_point_size"],
+                size_range=plot_range.get(size_name) if size_name else None,
+                color_range=plot_range.get(color_name) if color_name else None,
             )
         ax.set_xlabel(graph["xlabel"] or "Year")
         ax.set_title(graph["title"])
         if len(graph["values"]) > 1:
             ax.legend()
         ax.grid(True, alpha=0.3)
+        x_range = graph["range"].get("year")
+        y_range = graph["range"].get(graph["values"][0])
+        if x_range:
+            ax.set_xlim(*x_range)
+        if y_range:
+            ax.set_ylim(*y_range)
         fig.tight_layout()
         self._annotate_tag(fig)
         fig.savefig(output_path, dpi=100, bbox_inches="tight")
@@ -847,7 +873,7 @@ class PopulationSimulation:
         if successful:
             self._generate_model_graphs(final=True, output_dir=output_dir)
             for graph in self.model_metadata["graphs"]:
-                if graph["annual"] and graph["animated"]:
+                if graph["annual"] and graph["animated"] and not graph["last"]:
                     self._build_animation_gif(
                         f"{graph['filename']}_",
                         f"{graph['filename']}.gif",

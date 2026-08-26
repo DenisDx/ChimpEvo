@@ -392,3 +392,36 @@ def test_points_style_model_graph_renders_scatter_with_size_and_color(tmp_path, 
     assert image_path.stat().st_size > 0
     with Image.open(image_path) as image:
         image.verify()
+
+
+@pytest.mark.smoke
+def test_last_model_graph_only_renders_final_file(tmp_path, monkeypatch):
+    """Skip annual output and write an unnumbered graph at final export."""
+    monkeypatch.chdir(tmp_path)
+    simulation = PopulationSimulation(make_settings(tag="last_graph"))
+    simulation.model_metadata["graphs"] = [{
+        "filename": "last_graph",
+        "title": "Last graph",
+        "xlabel": "Year",
+        "values": ["avg_beta"],
+        "labels": ["Average beta"],
+        "type": "time",
+        "annual": True,
+        "final": True,
+        "animated": False,
+        "style": "lines",
+        "max_point_size": 200.0,
+        "last": True,
+        "filter": {},
+        "range": {},
+    }]
+    simulation.results = [{"year": 0, "avg_beta": 0.1}]
+    annual_path = tmp_path / "annual.png"
+    final_path = tmp_path / "last_graph.png"
+
+    simulation._generate_model_graphs(annual=True, year=0, output_dir=tmp_path)
+    simulation._generate_model_graphs(final=True, output_dir=tmp_path)
+
+    assert not (tmp_path / "last_graph_0000000.png").exists()
+    assert final_path.is_file()
+    assert not annual_path.exists()

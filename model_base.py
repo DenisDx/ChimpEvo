@@ -190,6 +190,7 @@ aging, and mortality in that order. Births are limited by mature population,
             "animated": True,
             "data_label": "tag",
             "style": "points", #could be "lines", "points", "bars"
+            "last": True, #default false, if true, the graph will be rendered only for the last row (so it will be a single file)
         },
         {
             "filename": "beta_factors",
@@ -203,6 +204,28 @@ aging, and mortality in that order. Births are limited by mature population,
             "animated": True,
             "data_label": "tag",
             "style": "points", #could be "lines", "points", "bars"
+            "last": True,
+        },
+        {
+            "filename": "beta_factors lambda bigger than",
+            "title": "Beta dependency on lambda, P mutation, mutation_x",
+            "xlabel": "Beta factor",
+            "xvalue": "avg_beta",
+            "values": ["lambda"],
+            "values2": ["mutation_probability"],
+            "values3": ["mutation_x"],
+            "labels": ["Lambda"],
+            "animated": True,
+            "data_label": "tag",
+            "style": "points", #could be "lines", "points", "bars"
+            "last": True,
+            "filter": {
+                "lambda": [0.01, 0.05],
+                "mutation_probability": [0.05, 0.15],
+            },
+            "range": {
+                "avg_beta": [0.0, 0.25],
+            }
         }
         ]
 

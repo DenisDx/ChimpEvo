@@ -29,6 +29,45 @@ def make_batch_config():
 
 
 @pytest.mark.smoke
+def test_metagraph_filter_last_and_range_options(tmp_path, monkeypatch):
+    """Filter aggregate rows, render one final frame, and clamp configured axes."""
+    captured = []
+    monkeypatch.setattr(
+        batch_module,
+        "render_series",
+        lambda axis, x_values, y_values, *args, **kwargs: captured.append((x_values, y_values)),
+    )
+    metadata = {
+        "metagraphs": [{
+            "filename": "filtered",
+            "values": ["avg_beta"],
+            "labels": ["Average beta"],
+            "title": "Filtered",
+            "xlabel": "mutation_x",
+            "xvalue": "mutation_x",
+            "animated": True,
+            "style": "lines",
+            "max_point_size": 200.0,
+            "last": True,
+            "filter": {"lambda": [0.0, 0.1]},
+            "range": {"mutation_x": [0.0, 1.0], "avg_beta": [0.0, 1.0]},
+        }],
+    }
+    rows = [
+        {"tag": "kept_a", "mutation_x": "-1", "lambda": "0.05", "avg_beta": "-2"},
+        {"tag": "dropped", "mutation_x": "0.5", "lambda": "0.2", "avg_beta": "0.5"},
+        {"tag": "kept_b", "mutation_x": "2", "lambda": "0.05", "avg_beta": "2"},
+    ]
+
+    batch_module._render_metagraphs(metadata, rows, tmp_path)
+
+    assert captured == [([0.0, 1.0], [0.0, 1.0])]
+    assert (tmp_path / "filtered.png").is_file()
+    assert not list(tmp_path.glob("filtered_*.png"))
+
+
+
+@pytest.mark.smoke
 def test_annotate_metagraph_points_labels_every_point():
     """Label every metagraph point with its data_label value."""
     import matplotlib.pyplot as plt
@@ -244,9 +283,9 @@ def test_batch_builds_final_graph_movie_and_cumulative_metagraph(tmp_path, monke
 
     result_dir = tmp_path / "result"
     assert (result_dir / "beta_evolution.gif").is_file()
-    assert (result_dir / "beta_by_mutation_0000001.png").is_file()
-    assert (result_dir / "beta_by_mutation_0000002.png").is_file()
-    assert (result_dir / "beta_by_mutation.gif").is_file()
+    assert (result_dir / "beta_by_mutation.png").is_file()
+    assert not list(result_dir.glob("beta_by_mutation_*.png"))
+    assert not (result_dir / "beta_by_mutation.gif").exists()
 
 
 @pytest.mark.smoke
@@ -270,10 +309,9 @@ def test_batch_rebuilds_root_artifacts_for_current_csv_tags_only(tmp_path, monke
     run_batch("multi.csv", "config.json")
 
     result_dir = tmp_path / "result"
-    assert (result_dir / "beta_by_mutation_0000001.png").is_file()
-    assert not (result_dir / "beta_by_mutation_0000002.png").exists()
-    with Image.open(result_dir / "beta_by_mutation.gif") as movie:
-        assert movie.n_frames == 1
+    assert (result_dir / "beta_by_mutation.png").is_file()
+    assert not list(result_dir.glob("beta_by_mutation_*.png"))
+    assert not (result_dir / "beta_by_mutation.gif").exists()
 
 
 @pytest.mark.smoke

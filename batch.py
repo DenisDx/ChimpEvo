@@ -12,7 +12,7 @@ import matplotlib.pyplot as plt
 from PIL import Image
 from main import run_simulation, log, validate_runtime_config
 from experiment_manager import ExperimentNotSelectedError, archive_path, resolve_experiment_paths
-from graph_style import render_series
+from graph_style import clamp_values, render_series
 from load_model import load_model_class
 from metadata import validate_model_metadata
 from settings import DEFAULT_SETTINGS
@@ -223,20 +223,35 @@ def _annotate_metagraph_points(axis, graph, frame_rows, x_values, data_label):
         )
 
 
+def _row_passes_plot_filter(row, plot_filter):
+    """Return whether one aggregate row passes every configured filter."""
+    for field_name, bounds in plot_filter.items():
+        try:
+            value = float(row[field_name])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not bounds[0] <= value <= bounds[1]:
+            return False
+    return True
+
+
 def _render_metagraphs(metadata, rows, output_dir):
     """Render cumulative aggregate plots and optional GIFs for declared metagraphs."""
     for graph in metadata["metagraphs"]:
         filename = graph["filename"]
         for stale_frame in output_dir.glob(f"{filename}_*.png"):
             stale_frame.unlink()
+        (output_dir / f"{filename}.png").unlink(missing_ok=True)
         gif_path = output_dir / f"{filename}.gif"
         gif_path.unlink(missing_ok=True)
 
+        ordered_rows = [
+            row for row in rows if _row_passes_plot_filter(row, graph["filter"])
+        ]
         xvalue = graph.get("xvalue")
-        if xvalue is not None and any(xvalue not in row or row[xvalue] == "" for row in rows):
+        if xvalue is not None and any(xvalue not in row or row[xvalue] == "" for row in ordered_rows):
             log(f"Skipping metagraph {filename}: aggregate report has no {xvalue} values")
             continue
-        ordered_rows = list(rows)
         if xvalue is not None:
             try:
                 ordered_rows.sort(key=lambda row: float(row[xvalue]))
@@ -249,9 +264,10 @@ def _render_metagraphs(metadata, rows, output_dir):
         style = graph["style"]
         values2 = graph.get("values2")
         values3 = graph.get("values3")
-        for index in range(1, len(ordered_rows) + 1):
-            frame_rows = ordered_rows[:index]
-            x_values = list(range(1, index + 1)) if xvalue is None else [
+        frame_count = 1 if graph["last"] and ordered_rows else len(ordered_rows)
+        for index in range(1, frame_count + 1):
+            frame_rows = ordered_rows if graph["last"] else ordered_rows[:index]
+            x_values = list(range(1, len(frame_rows) + 1)) if xvalue is None else [
                 float(row[xvalue]) for row in frame_rows
             ]
             figure, axis = plt.subplots(figsize=(10, 6))
@@ -270,16 +286,26 @@ def _render_metagraphs(metadata, rows, output_dir):
                     ]
                 except (KeyError, TypeError, ValueError):
                     continue
+                series_x_values = clamp_values(
+                    [point[0] for point in series_points],
+                    graph["range"].get(xvalue or "batch_index"),
+                )
+                series_y_values = clamp_values(
+                    [point[1] for point in series_points],
+                    graph["range"].get(value_name),
+                )
                 render_series(
                     axis,
-                    [point[0] for point in series_points],
-                    [point[1] for point in series_points],
+                    series_x_values,
+                    series_y_values,
                     label,
                     style,
                     size_values=[point[2] for point in series_points] if size_name else None,
                     color_values=[point[3] for point in series_points] if color_name else None,
                     max_point_size=graph["max_point_size"],
                     marker="o",
+                    size_range=graph["range"].get(size_name) if size_name else None,
+                    color_range=graph["range"].get(color_name) if color_name else None,
                 )
             if data_label is not None:
                 _annotate_metagraph_points(axis, graph, frame_rows, x_values, data_label)
@@ -288,11 +314,23 @@ def _render_metagraphs(metadata, rows, output_dir):
             axis.grid(True, alpha=0.3)
             if len(graph["values"]) > 1:
                 axis.legend()
-            frame_path = output_dir / f"{filename}_{index:07d}.png"
+            x_range = graph["range"].get(xvalue or "batch_index")
+            y_range = graph["range"].get(graph["values"][0])
+            if x_range:
+                axis.set_xlim(*x_range)
+            if y_range:
+                axis.set_ylim(*y_range)
+            frame_path = (
+                output_dir / f"{filename}.png"
+                if graph["last"]
+                else output_dir / f"{filename}_{index:07d}.png"
+            )
             figure.tight_layout()
             figure.savefig(frame_path, dpi=100, bbox_inches="tight")
             plt.close(figure)
             frame_paths.append(frame_path)
+        if graph["last"]:
+            continue
         if graph["animated"]:
             _save_gif(frame_paths, gif_path)
 
