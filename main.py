@@ -67,6 +67,7 @@ def validate_runtime_config(settings, model_class=None):
     if not isinstance(settings, dict):
         raise TypeError("Configuration must be a JSON object")
     settings.setdefault("min_iterations", DEFAULT_SETTINGS["min_iterations"])
+    settings.setdefault("beta_only_positive", False)
     for name in ("model", "tag", "device", *CORE_RUNTIME_SETTINGS):
         if name not in settings:
             raise ValueError(f"Missing required setting: {name}")

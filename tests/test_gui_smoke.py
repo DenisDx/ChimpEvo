@@ -215,6 +215,17 @@ def test_gui_constructs_and_updates_valid_settings(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_renders_boolean_model_settings_as_checkboxes(gui_app):
+    """Use a checkbox and BooleanVar for supported boolean model settings."""
+    row = gui_app.model_setting_rows["beta_only_positive"]
+
+    assert row["widgets"][2].winfo_class() == "TCheckbutton"
+    row["value"].set(True)
+    assert gui_app._update_config_from_ui() is True
+    assert gui_app.config["beta_only_positive"] is True
+
+
+@pytest.mark.smoke
 def test_gui_update_from_ui_does_not_mark_dirty_without_edits(gui_app):
     """Reading unchanged controls back must never mark the configuration dirty."""
     assert gui_app.is_config_dirty is False

@@ -6,6 +6,7 @@ DEFAULT_SETTINGS = {
     "lambda": 0.043,  # extrinsic mortality (Λ)
     "alpha": 0.001,   # age-related mortality multiplier (α)
     "beta_initial": 0.11,  # initial genetic parameter (ß)
+    "beta_only_positive": False,  # prevent beta values below zero
     "mature_age": 12,  # minimum age for reproduction
     "fecundity": 1.0,  # max offspring per mature animal per year
     "mutation_probability": 0.1,  # probability of mutation per reproduction

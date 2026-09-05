@@ -45,6 +45,8 @@ class Model_base_fecundity(Model_base):
                 device=self.device,
             ).uniform_(lower, upper)
             child_betas += mutation_shifts * mutation_mask
+        if self.settings.get("beta_only_positive", False):
+            child_betas.clamp_(min=0.0)
 
         children = torch.empty(
             (birth_count, len(self.population_fields)),

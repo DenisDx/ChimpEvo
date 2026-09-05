@@ -9,6 +9,8 @@ import torch
 class Model:
     """Provide shared age-based behavior for dynamic population models."""
 
+    population_fields_depend_on_settings = False
+
     @staticmethod
     def description():
         """Return the model description as lightweight Markdown."""
@@ -33,7 +35,10 @@ adds or changes.
         """Store settings, device, population schema, and annual counters."""
         self.settings = settings
         self.device = device
-        field_declarations = self.add_population_fields()
+        if self.population_fields_depend_on_settings:
+            field_declarations = self.add_population_fields(settings)
+        else:
+            field_declarations = self.add_population_fields()
         if not isinstance(field_declarations, dict):
             raise TypeError("add_population_fields() must return a dict")
 
@@ -295,3 +300,8 @@ adds or changes.
     def should_stop(self):
         """Return no model-specific stop reason."""
         return None
+
+    @staticmethod
+    def get_estimated_memory_consumption(config):
+        """Return the estimated peak population-memory consumption in bytes."""
+        return 0

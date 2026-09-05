@@ -89,6 +89,10 @@ aging, and mortality in that order. Births are limited by mature population,
                 "description": "Initial genetic parameter", "default": 0.11,
                 "type": "float", "min": 0.0, "max": 1.0,
             },
+            "beta_only_positive": {
+                "description": "Prevent inherited and expressed beta values below zero",
+                "default": False, "type": "bool",
+            },
             "mature_age": {
                 "description": "Minimum reproduction age", "default": 12,
                 "type": "int", "min": 1, "max": 50,
@@ -249,6 +253,8 @@ x_2.0,2.0
         initial_population = int(self.settings["initial_population"])
         initial_age_max = int(self.settings["initial_age_max"])
         beta_initial = float(self.settings["beta_initial"])
+        if self.settings.get("beta_only_positive", False) and beta_initial < 0.0:
+            raise ValueError("beta_initial must be nonnegative when beta_only_positive is enabled")
         self.avg_beta_ema = None
         self._previous_avg_beta = None
         self._beta_changes = []
@@ -267,6 +273,11 @@ x_2.0,2.0
             device=self.device,
         )
         self._set_population(torch.stack([ages, betas], dim=1))
+
+    @staticmethod
+    def get_estimated_memory_consumption(config):
+        """Return a compact peak-memory estimate for the beta population tensor."""
+        return int(config.get("max_population", 0)) * 2 * 4 * 2
 
     def calculate_mortality_probability(self, ages, betas):
         """Return clamped Gompertz mortality probabilities."""
@@ -318,12 +329,13 @@ x_2.0,2.0
         """Return a parental-average beta with an optional mutation shift."""
         base_beta = (parent_beta1 + parent_beta2) / 2.0
         if random.random() >= self.settings["mutation_probability"]:
-            return base_beta
+            return max(0.0, base_beta) if self.settings.get("beta_only_positive", False) else base_beta
 
         mutation_x = self.settings["mutation_x"]
         mutation_s = self.settings["mutation_s"]
         lower, upper = mutation_interval(mutation_x, mutation_s)
-        return base_beta + random.uniform(lower, upper)
+        child_beta = base_beta + random.uniform(lower, upper)
+        return max(0.0, child_beta) if self.settings.get("beta_only_positive", False) else child_beta
 
     def apply_reproduction(self):
         """Create offspring up to fecundity and population limits."""

@@ -304,6 +304,18 @@ def test_runtime_config_defaults_missing_minimum_to_zero(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_runtime_config_defaults_missing_beta_only_positive_to_false(tmp_path, monkeypatch):
+    """Keep persisted configurations without beta_only_positive compatible."""
+    monkeypatch.chdir(tmp_path)
+    settings = make_settings()
+    settings.pop("beta_only_positive")
+
+    simulation = PopulationSimulation(settings)
+
+    assert simulation.settings["beta_only_positive"] is False
+
+
+@pytest.mark.smoke
 def test_empty_model_subclass_runs_without_overrides(tmp_path, monkeypatch):
     """Run one core-managed year with an otherwise empty dynamic model."""
 

@@ -35,3 +35,11 @@ models, and any other brief operational notes.
 - **Inheritance:** A child independently receives one random allele (`beta1` or `beta2`) from each parent. Each inherited allele has its own mutation-probability check and, when selected, its own independently sampled X/S/Z shift.
 - **Codominance:** The stored phenotype is $beta=(beta1+beta2)/2$. Both allele sets contribute equally because beta represents the aggregate behavior of many genes rather than dominance at a single gene.
 - **Compatibility:** Population rows keep public `beta` at column 1 and store private `beta1` and `beta2` after it. Mortality, beta statistics, graphs, and stabilization remain inherited and consume the stored phenotype.
+
+## model_alleles
+
+- **Purpose:** Simulate `N_alleles` independent diploid beta loci with optional dominance and allele-specific delayed age effects.
+- **Key settings:** `N_alleles`, `delta_x`, `delta_reversion`, and `use_dominance`; inherited `mutation_probability`, $X$, $S$, $Z$, and `beta_only_positive` remain available in batch configurations.
+- **Inheritance:** Every child independently takes one allele at each locus from each parent. One mutation check per inherited allele jointly updates beta and its optional dominance/delta attributes.
+- **Phenotype:** Without delta, public beta is the mean of all alleles or the selected dominant allele per pair. With delta, the model recalculates an effective beta before mortality from $beta_i(t-delta_i)/t$. This is an effective-beta approximation, not an average of per-allele mortality probabilities.
+- **Compatibility:** The public `age` and `beta` fields remain first; all dynamic allele fields are private and are not written as CSV columns.

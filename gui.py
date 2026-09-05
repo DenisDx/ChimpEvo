@@ -664,8 +664,9 @@ class SimulationGUI:
         ).pack(side=tk.LEFT, padx=5)
 
         # Device selection
-        device_frame = ttk.LabelFrame(parent, text="Device", padding=10)
+        device_frame = ttk.LabelFrame(parent, text="Device and memory", padding=10)
         device_frame.pack(fill=tk.X, pady=5, padx=5)
+        device_frame.columnconfigure(1, weight=1)
         
         available_cuda = torch.cuda.is_available()
         selected_device = self.config.get("device", "cuda" if available_cuda else "cpu")
@@ -673,6 +674,7 @@ class SimulationGUI:
             selected_device = "cpu"
         self.device_var = tk.StringVar(value=selected_device)
         self.device_var.trace_add("write", self._mark_config_dirty)
+        self.device_var.trace_add("write", self._update_memory_estimate)
         
         cuda_button = ttk.Radiobutton(
             device_frame,
@@ -681,14 +683,14 @@ class SimulationGUI:
             value="cuda",
             state=tk.NORMAL if available_cuda else tk.DISABLED,
         )
-        cuda_button.pack(anchor=tk.W)
+        cuda_button.grid(row=0, column=0, sticky=tk.W)
         cpu_button = ttk.Radiobutton(
             device_frame,
             text="CPU",
             variable=self.device_var,
             value="cpu",
         )
-        cpu_button.pack(anchor=tk.W)
+        cpu_button.grid(row=1, column=0, sticky=tk.W)
         self.tooltips.register(cuda_button, PARAMETER_DESCRIPTIONS["device"])
         self.tooltips.register(cpu_button, PARAMETER_DESCRIPTIONS["device"])
         
@@ -698,7 +700,9 @@ class SimulationGUI:
                      "If using GPU, increase stat_generation_period and graph_generation_period to reduce transfers.")
         note_label = ttk.Label(device_frame, text=note_text, foreground="gray", 
                               font=("TkDefaultFont", 8), wraplength=400, justify=tk.LEFT)
-        note_label.pack(anchor=tk.W, pady=(5, 0))
+        note_label.grid(row=0, column=1, rowspan=2, padx=(20, 0), sticky=tk.W)
+        self.memory_estimate_label = ttk.Label(device_frame, justify=tk.LEFT)
+        self.memory_estimate_label.grid(row=2, column=0, columnspan=2, pady=(5, 0), sticky=tk.W)
         
         self.setting_vars = {}
         self.core_setting_widgets = {}
@@ -721,9 +725,15 @@ class SimulationGUI:
             )
             bounds_label.grid(row=row, column=2, sticky=tk.W)
             description = PARAMETER_DESCRIPTIONS[name]
-            self.core_setting_widgets[name] = (name_label, value_entry, bounds_label)
+            description_label = ttk.Label(core_frame, text=description, wraplength=420)
+            description_label.grid(row=row, column=3, padx=5, sticky=tk.W)
+            self.core_setting_widgets[name] = (
+                name_label, value_entry, bounds_label, description_label,
+            )
             for widget in self.core_setting_widgets[name]:
                 self.tooltips.register(widget, description)
+
+        self._update_memory_estimate()
 
         self.model_settings_frame = ttk.LabelFrame(parent, text="Model Settings", padding=10)
         self.model_settings_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
@@ -2270,6 +2280,37 @@ class SimulationGUI:
             return f"{minimum} <= x"
         return f"{minimum} <= x <= {maximum}"
 
+    def _update_memory_estimate(self, *_):
+        """Show the active model's compact peak-memory estimate and warning."""
+        if not hasattr(self, "memory_estimate_label"):
+            return
+        try:
+            config = dict(self.config)
+            config["device"] = self.device_var.get()
+            for name, row in getattr(self, "model_setting_rows", {}).items():
+                metadata = self.model_metadata["settings"].get(name)
+                if metadata:
+                    config[name] = self._parse_setting_value(name, row["value"].get(), metadata)
+            model_class = load_model_class(config["model"])
+            memory_bytes = model_class.get_estimated_memory_consumption(config)
+        except (KeyError, TypeError, ValueError, ModelLoadError):
+            self.memory_estimate_label.configure(text="Peak memory estimate: unavailable", foreground="gray")
+            return
+        memory_gib = memory_bytes / (1024 ** 3)
+        warning = False
+        suffix = ""
+        if config["device"] == "cuda" and torch.cuda.is_available():
+            total_gib = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+            warning = memory_gib > total_gib
+            suffix = f" / {total_gib:.2f} GiB GPU"
+        elif config["device"] == "cpu":
+            warning = memory_gib > 16.0
+            suffix = " / 16.00 GiB CPU warning limit"
+        self.memory_estimate_label.configure(
+            text=f"Peak memory estimate: {memory_gib:.2f} GiB{suffix}",
+            foreground="red" if warning else "gray",
+        )
+
     def _rebuild_model_settings_grid(self):
         """Rebuild editable setting rows from active model metadata."""
         for widget in self.model_settings_frame.winfo_children():
@@ -2295,10 +2336,15 @@ class SimulationGUI:
             for name in unsupported_names
         ]
         for row_index, (name, metadata, supported) in enumerate(setting_rows, start=1):
-            value = tk.StringVar(
-                value=str(self.config.get(name, metadata["default"] if metadata else "")),
+            is_boolean = supported and metadata["type"] == "bool"
+            initial_value = self.config.get(name, metadata["default"] if metadata else "")
+            value = (
+                tk.BooleanVar(value=initial_value)
+                if is_boolean
+                else tk.StringVar(value=str(initial_value))
             )
             value.trace_add("write", self._mark_config_dirty)
+            value.trace_add("write", self._update_memory_estimate)
             bounds = tk.StringVar(value=self._format_setting_bounds(metadata) if metadata else "")
             description = tk.StringVar(
                 value=metadata["description"] if metadata else "Not supported by the active model",
@@ -2322,12 +2368,19 @@ class SimulationGUI:
             name_label.grid(
                 row=row_index, column=1, padx=4, sticky=tk.W,
             )
-            value_entry = ttk.Entry(
-                self.model_settings_frame,
-                textvariable=value,
-                width=18,
-                state=tk.NORMAL if supported else tk.DISABLED,
-            )
+            if is_boolean:
+                value_entry = ttk.Checkbutton(
+                    self.model_settings_frame,
+                    variable=value,
+                    state=tk.NORMAL if supported else tk.DISABLED,
+                )
+            else:
+                value_entry = ttk.Entry(
+                    self.model_settings_frame,
+                    textvariable=value,
+                    width=18,
+                    state=tk.NORMAL if supported else tk.DISABLED,
+                )
             value_entry.grid(
                 row=row_index, column=2, padx=4, sticky=tk.W,
             )
@@ -2458,6 +2511,8 @@ class SimulationGUI:
         if setting_type == "float":
             return float(value_text)
         if setting_type == "str":
+            return value_text
+        if isinstance(value_text, bool):
             return value_text
         if value_text.lower() in {"true", "1", "yes"}:
             return True

@@ -100,6 +100,8 @@ field.
         initial_population = int(self.settings["initial_population"])
         initial_age_max = int(self.settings["initial_age_max"])
         beta_initial = float(self.settings["beta_initial"])
+        if self.settings.get("beta_only_positive", False) and beta_initial < 0.0:
+            raise ValueError("beta_initial must be nonnegative when beta_only_positive is enabled")
         self.avg_beta_ema = None
         self._previous_avg_beta = None
         self._beta_changes = []
@@ -118,6 +120,11 @@ field.
             device=self.device,
         )
         self._set_population(torch.stack([ages, betas, betas, betas], dim=1))
+
+    @staticmethod
+    def get_estimated_memory_consumption(config):
+        """Return a compact peak-memory estimate for diploid population state."""
+        return int(config.get("max_population", 0)) * 4 * 4 * 2
 
     def apply_reproduction(self):
         """Create offspring with independent allele inheritance and mutation."""
@@ -172,6 +179,8 @@ field.
                 self.device,
             ).reshape(birth_count, 2)
             child_alleles += mutation_shifts * mutation_mask
+        if self.settings.get("beta_only_positive", False):
+            child_alleles.clamp_(min=0.0)
 
         child_betas = child_alleles.mean(dim=1)
         children = torch.empty(
