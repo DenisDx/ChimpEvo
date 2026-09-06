@@ -8,6 +8,7 @@ from model import Model
 from model_base import Model_base, mutation_interval
 from model_base_fast import Model_base_fast
 from model_base_fast_fixed_fecundity import Model_base_fecundity
+from model_base_fecundity_m import Model_base_fecundity_m
 from settings import DEFAULT_SETTINGS
 
 
@@ -126,6 +127,51 @@ def test_model_base_fecundity_limits_each_parent_to_annual_capacity():
     assert model.last_born == 2
     assert model.population.shape == (6, 2)
     torch.testing.assert_close(model.population[-2:, 0], torch.zeros(2))
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("mutation_s", "expected_beta"),
+    [(-1.0, 0.1), (1.0, 0.4)],
+)
+def test_fecundity_m_applies_requested_multiplicative_mutation(
+    monkeypatch,
+    mutation_s,
+    expected_beta,
+):
+    """Divide or multiply the parental mean by 1 + X according to S."""
+    settings = make_settings()
+    settings.update({
+        "max_population": 3,
+        "mature_age": 2,
+        "fecundity": 1.0,
+        "mutation_probability": 1.0,
+        "mutation_x": 1.0,
+        "mutation_s": mutation_s,
+    })
+    model = Model_base_fecundity_m(settings, torch.device("cpu"))
+    model._set_population(torch.tensor([[2.0, 0.1], [2.0, 0.3]]))
+    monkeypatch.setattr(
+        torch,
+        "randperm",
+        lambda count, device=None: torch.arange(count, device=device),
+    )
+
+    assert model.apply_reproduction() == 1
+    assert model.population[-1, 1].item() == pytest.approx(expected_beta)
+
+
+@pytest.mark.smoke
+def test_fecundity_m_suppresses_beta_only_positive():
+    """Ignore the inherited positive-beta flag and omit it from model metadata."""
+    settings = make_settings()
+    settings.update({"beta_initial": -0.2, "beta_only_positive": True})
+    model = Model_base_fecundity_m(settings, torch.device("cpu"))
+
+    model.initialize_population()
+
+    assert "beta_only_positive" not in Model_base_fecundity_m.add_settings()
+    assert torch.all(model.population[:, 1] == -0.2)
 
 
 @pytest.mark.smoke

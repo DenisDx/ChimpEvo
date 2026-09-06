@@ -21,6 +21,12 @@ models, and any other brief operational notes.
 - **Key settings:** `fecundity` is an integer per-parent annual participation limit; its fractional part is ignored.
 - **Difference:** Each offspring consumes one available slot from each of two parents. A parent appears at most `floor(fecundity)` times; maximum births are half the available parent slots. Sexes are still not modeled.
 
+## model_base_fecundity_m
+
+- **Purpose:** Study beta evolution with fixed parent fecundity and proportional mutation effects.
+- **Key settings:** `mutation_x` is the relative multiplier magnitude; `mutation_s` sets the upward multiplier probability to `(S + 1) / 2`.
+- **Difference:** Retains the batched fixed-parent-slot reproduction of `model_base_fast_fixed_fecundity`, but mutating beta is multiplied or divided by `1 + mutation_x` rather than receiving an additive X/S shift.
+
 ## model_base_z
 
 - **Purpose:** Study an independent bias in the probability of positive versus negative beta mutations while retaining fixed per-parent fecundity and batched reproduction.

@@ -18,6 +18,8 @@ def mutation_interval(mutation_x, mutation_s):
 class Model_base(Model):
     """Provide the current beta model through the dynamic-model naming contract."""
 
+    supports_beta_only_positive = True
+
     @staticmethod
     def description():
         """Return the beta/Gompertz model description as lightweight Markdown."""
@@ -253,7 +255,11 @@ x_2.0,2.0
         initial_population = int(self.settings["initial_population"])
         initial_age_max = int(self.settings["initial_age_max"])
         beta_initial = float(self.settings["beta_initial"])
-        if self.settings.get("beta_only_positive", False) and beta_initial < 0.0:
+        if (
+            self.supports_beta_only_positive
+            and self.settings.get("beta_only_positive", False)
+            and beta_initial < 0.0
+        ):
             raise ValueError("beta_initial must be nonnegative when beta_only_positive is enabled")
         self.avg_beta_ema = None
         self._previous_avg_beta = None

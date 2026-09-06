@@ -226,6 +226,22 @@ def test_gui_renders_boolean_model_settings_as_checkboxes(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_disables_suppressed_beta_only_positive_for_multiplicative_model(gui_app):
+    """Show retained beta_only_positive as unsupported for the multiplicative model."""
+    config, metadata, _ = gui_module._prepare_model_configuration(
+        gui_app.config,
+        "model_base_fecundity_m",
+    )
+    gui_app.config = config
+    gui_app.model_metadata = metadata
+    gui_app._rebuild_model_settings_grid()
+
+    row = gui_app.model_setting_rows["beta_only_positive"]
+    assert row["supported"] is False
+    assert str(row["widgets"][2].cget("state")) == "disabled"
+
+
+@pytest.mark.smoke
 def test_gui_update_from_ui_does_not_mark_dirty_without_edits(gui_app):
     """Reading unchanged controls back must never mark the configuration dirty."""
     assert gui_app.is_config_dirty is False
