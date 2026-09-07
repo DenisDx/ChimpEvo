@@ -38,10 +38,11 @@ def _format_numeric(value):
 
 def _parse_filter(filter_text):
     """Parse an empty or JSON range-filter string into field bounds."""
-    if not filter_text:
-        return {}
     if not isinstance(filter_text, str):
         raise ValueError("filter must be an empty string or a JSON object")
+    filter_text = filter_text.strip()
+    if not filter_text:
+        return {}
     try:
         filter_value = json.loads(filter_text)
     except json.JSONDecodeError as error:
@@ -75,6 +76,16 @@ def _parse_color_boundary(value, name):
     if not np.isfinite(boundary):
         raise ValueError(f"{name} must be finite")
     return boundary
+
+
+def _get_figure_width(values1, values3, title1):
+    """Return a PDF width that fits the outer horizontal group labels."""
+    column_count = len(values1) * len(values3)
+    label_width = max(
+        len(f"{title1}: {_format_numeric(value1)}") * 0.08 + 0.40
+        for value1 in values1
+    )
+    return max(8.0, column_count * 0.9 + len(values1) * 0.12 + 2.3, len(values1) * label_width / 0.73)
 
 
 class Report_heatmap(Report):
@@ -198,8 +209,10 @@ class Report_heatmap(Report):
         output_path = output_dir / f"{config['filename']}{suffix}.pdf"
         column_count = len(values1) * len(values3)
         row_count = len(values2) * len(values4)
-        figure_width = max(8.0, column_count * 0.9 + len(values1) * 0.12 + 2.3)
-        figure_height = max(6.0, row_count * 0.55 + len(values2) * 0.22 + 1.6)
+        row_group_gap = 0.35
+        table_height = row_count + (len(values2) - 1) * row_group_gap
+        figure_width = _get_figure_width(values1, values3, config["title1"])
+        figure_height = max(6.0, table_height * 0.55 + len(values2) * 0.22 + 1.6)
         with PdfPages(output_path) as pdf:
             figure = plt.figure(figsize=(figure_width, figure_height))
             table_axis = figure.add_axes((0.10, 0.14, 0.73, 0.70))
@@ -207,7 +220,7 @@ class Report_heatmap(Report):
             group_axis = figure.add_axes((0.84, 0.14, 0.035, 0.70))
             color_axis = figure.add_axes((0.92, 0.15, 0.025, 0.62))
             table_axis.set_xlim(0, column_count)
-            table_axis.set_ylim(row_count, 0)
+            table_axis.set_ylim(table_height, 0)
             table_axis.set_xticks([
                 index + 0.5
                 for index in range(column_count)
@@ -222,12 +235,13 @@ class Report_heatmap(Report):
             for spine in table_axis.spines.values():
                 spine.set_visible(False)
             for row_index, dimension2_value in enumerate(values2):
+                group_start = row_index * (len(values4) + row_group_gap)
                 for column_index, dimension1_value in enumerate(values1):
                     for inner_row, dimension4_value in enumerate(values4):
                         for inner_column, dimension3_value in enumerate(values3):
                             key = (dimension1_value, dimension2_value, dimension3_value, dimension4_value)
                             x = column_index * len(values3) + inner_column
-                            y = row_index * len(values4) + inner_row
+                            y = group_start + inner_row
                             cell_value = cells.get(key)
                             color = "#f7f7f7" if cell_value is None else colormap(normalization(cell_value))
                             table_axis.add_patch(Rectangle(
@@ -257,10 +271,11 @@ class Report_heatmap(Report):
                                         color="#444444",
                                     )
             for group_index in range(len(values2)):
+                group_start = group_index * (len(values4) + row_group_gap)
                 for value_index, value4 in enumerate(values4):
                     table_axis.text(
                         -0.04,
-                        group_index * len(values4) + value_index + 0.5,
+                        group_start + value_index + 0.5,
                         _format_numeric(value4),
                         ha="right",
                         va="center",
@@ -269,8 +284,6 @@ class Report_heatmap(Report):
                     )
             for group_index in range(1, len(values1)):
                 table_axis.axvline(group_index * len(values3), color="white", linewidth=9)
-            for group_index in range(1, len(values2)):
-                table_axis.axhline(group_index * len(values4), color="white", linewidth=18)
 
             header_axis.set_xlim(0, column_count)
             header_axis.set_ylim(0, 1)
@@ -295,10 +308,10 @@ class Report_heatmap(Report):
                 )
 
             group_axis.set_xlim(0, 1)
-            group_axis.set_ylim(row_count, 0)
+            group_axis.set_ylim(table_height, 0)
             group_axis.axis("off")
             for index, value2 in enumerate(values2):
-                start = index * len(values4)
+                start = index * (len(values4) + row_group_gap)
                 group_axis.add_patch(Rectangle(
                     (0.08, start + 0.05), 0.84, len(values4) - 0.1,
                     facecolor="#fde5e5",

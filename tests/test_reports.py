@@ -2,7 +2,7 @@
 
 from load_report import discover_reports, execute_reports, load_report_class
 from report import normalize_report_config
-from report_heatmap import _normalize_numeric, _parse_color_boundary
+from report_heatmap import _get_figure_width, _normalize_numeric, _parse_color_boundary, _parse_filter
 
 
 def _aggregate_rows():
@@ -47,6 +47,11 @@ def test_heatmap_numeric_tolerance_groups_equivalent_dimension_values():
     assert _normalize_numeric("0.99999999999999") == _normalize_numeric("1.0")
 
 
+def test_heatmap_whitespace_filter_is_empty():
+    """Treat whitespace-only report filters as an empty filter."""
+    assert _parse_filter(" \t\n ") == {}
+
+
 def test_heatmap_color_range_boundaries_accept_numbers_or_empty_strings():
     """Parse optional color bounds while rejecting invalid report configuration."""
     assert _parse_color_boundary("", "color_range_min") is None
@@ -57,6 +62,12 @@ def test_heatmap_color_range_boundaries_accept_numbers_or_empty_strings():
         assert "color_range_max" in str(error)
     else:
         raise AssertionError("Invalid color-range setting must raise ValueError")
+
+
+def test_heatmap_width_fits_outer_labels_with_one_inner_value():
+    """Widen a constrained heatmap enough to show complete outer labels."""
+    width = _get_figure_width([0.05, 0.1, 0.25, 0.5], [0.5], "Mutation probability")
+    assert width >= 12.5
 
 
 def test_heatmap_ignores_incomplete_rows_and_averages_duplicate_coordinates(tmp_path):

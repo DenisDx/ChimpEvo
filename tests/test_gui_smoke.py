@@ -524,6 +524,31 @@ def test_gui_batch_start_confirms_duplicate_rows_once(gui_app, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_gui_report_generation_does_not_save_when_dirty_prompt_is_declined(gui_app, monkeypatch):
+    """Cancel report generation instead of implicitly saving dirty report settings."""
+    saves = []
+    gui_app._set_report_dirty(True)
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: False)
+    monkeypatch.setattr(gui_app, "_save_reports", lambda: saves.append(True))
+
+    assert gui_app._confirm_saved_report_inputs() is False
+    assert saves == []
+    assert gui_app.is_report_dirty is True
+
+
+@pytest.mark.smoke
+def test_gui_report_generation_saves_when_dirty_prompt_is_confirmed(gui_app, monkeypatch):
+    """Save dirty report settings only after a generation confirmation."""
+    saves = []
+    gui_app._set_report_dirty(True)
+    monkeypatch.setattr(gui_module.messagebox, "askyesno", lambda *args: True)
+    monkeypatch.setattr(gui_app, "_save_reports", lambda: saves.append(True))
+
+    assert gui_app._confirm_saved_report_inputs() is True
+    assert saves == [True]
+
+
+@pytest.mark.smoke
 def test_gui_changed_batch_configuration_can_cancel_launch(gui_app, monkeypatch):
     """List changed resolved values and leave the batch stopped on Cancel."""
     observed = {}

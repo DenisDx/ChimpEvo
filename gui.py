@@ -1643,10 +1643,22 @@ class SimulationGUI:
         with path.open(newline="", encoding="utf-8") as result_file:
             return list(csv.DictReader(result_file))
 
+    def _confirm_saved_report_inputs(self):
+        """Save dirty report settings after explicit confirmation."""
+        if self.is_report_dirty and not messagebox.askyesno(
+            "Unsaved reports",
+            "Save report changes before generating?",
+        ):
+            return False
+        if self.is_report_dirty:
+            self._save_reports()
+        return True
+
     def _generate_meta_reports(self):
         """Regenerate all meta-enabled reports from aggregate batch results."""
         try:
-            self._save_reports()
+            if not self._confirm_saved_report_inputs():
+                return
             paths = execute_reports(self.report_config_path, "meta", self.report_config_path.parent, self._read_report_rows(self._result_root() / "result.csv"), output_dir=self._result_root(), logger=log)
         except (OSError, ValueError, ReportLoadError) as error:
             messagebox.showerror("Reports", str(error))
@@ -1659,7 +1671,8 @@ class SimulationGUI:
             messagebox.showwarning("Reports", "Select a report.")
             return
         try:
-            self._save_reports()
+            if not self._confirm_saved_report_inputs():
+                return
             item = self.report_config["items"][self.report_selected_index]
             trigger = "meta" if item["meta"] else "final" if item["final"] else None
             if trigger is None:
