@@ -2,7 +2,7 @@
 
 from load_report import discover_reports, execute_reports, load_report_class
 from report import normalize_report_config
-from report_heatmap import _normalize_numeric
+from report_heatmap import _normalize_numeric, _parse_color_boundary
 
 
 def _aggregate_rows():
@@ -45,6 +45,18 @@ def test_heatmap_numeric_tolerance_groups_equivalent_dimension_values():
     """Treat equivalent CSV number spellings and rounding noise as one value."""
     assert _normalize_numeric("1") == _normalize_numeric("1.0")
     assert _normalize_numeric("0.99999999999999") == _normalize_numeric("1.0")
+
+
+def test_heatmap_color_range_boundaries_accept_numbers_or_empty_strings():
+    """Parse optional color bounds while rejecting invalid report configuration."""
+    assert _parse_color_boundary("", "color_range_min") is None
+    assert _parse_color_boundary("-0.25", "color_range_min") == -0.25
+    try:
+        _parse_color_boundary("invalid", "color_range_max")
+    except ValueError as error:
+        assert "color_range_max" in str(error)
+    else:
+        raise AssertionError("Invalid color-range setting must raise ValueError")
 
 
 def test_heatmap_ignores_incomplete_rows_and_averages_duplicate_coordinates(tmp_path):

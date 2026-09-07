@@ -62,6 +62,21 @@ def _parse_filter(filter_text):
     return normalized
 
 
+def _parse_color_boundary(value, name):
+    """Return an optional finite color-range boundary from a string setting."""
+    if value == "":
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{name} must be a number or an empty string")
+    try:
+        boundary = float(value)
+    except ValueError as error:
+        raise ValueError(f"{name} must be a number or an empty string") from error
+    if not np.isfinite(boundary):
+        raise ValueError(f"{name} must be finite")
+    return boundary
+
+
 class Report_heatmap(Report):
     """Render one aggregate metric over four result-table dimensions."""
 
@@ -90,6 +105,8 @@ class Report_heatmap(Report):
             "title3": "Mutation asymmetry (S)",
             "title4": "Mutation effect size (X)",
             "filter": "",
+            "color_range_min": "",
+            "color_range_max": "",
         }
 
     @staticmethod
@@ -108,6 +125,8 @@ class Report_heatmap(Report):
             "title3": "Label for the inner horizontal dimension.",
             "title4": "Label for the inner vertical dimension.",
             "filter": "JSON numeric ranges, for example {\"lambda\": [0.01, 0.05]}.",
+            "color_range_min": "Minimum color-scale value; empty uses the smallest cell value.",
+            "color_range_max": "Maximum color-scale value; empty uses the largest cell value.",
         }
 
     @staticmethod
@@ -157,10 +176,17 @@ class Report_heatmap(Report):
         color_values = np.array(list(cells.values()), dtype=float)
         if not np.isfinite(color_values).all():
             raise ValueError("Heatmap value column must contain finite numbers")
-        minimum, maximum = float(color_values.min()), float(color_values.max())
+        minimum = _parse_color_boundary(config.get("color_range_min", ""), "color_range_min")
+        maximum = _parse_color_boundary(config.get("color_range_max", ""), "color_range_max")
+        if minimum is None:
+            minimum = float(color_values.min())
+        if maximum is None:
+            maximum = float(color_values.max())
+        if minimum > maximum:
+            raise ValueError("color_range_min must not exceed color_range_max")
         if minimum == maximum:
             maximum = minimum + 1.0
-        normalization = colors.Normalize(vmin=minimum, vmax=maximum)
+        normalization = colors.Normalize(vmin=minimum, vmax=maximum, clip=True)
         colormap = LinearSegmentedColormap.from_list(
             "muted_blue_orange",
             ["#2166ac", "#f7f7f7", "#b35806"],
@@ -224,7 +250,7 @@ class Report_heatmap(Report):
                                     table_axis.text(
                                         x + 0.5,
                                         y + 0.68,
-                                        f"{sample_count} rows",
+                                        f"(n={sample_count})",
                                         ha="center",
                                         va="center",
                                         fontsize=5.5,
