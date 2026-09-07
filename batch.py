@@ -14,6 +14,7 @@ from main import run_simulation, log, validate_runtime_config
 from experiment_manager import ExperimentNotSelectedError, archive_path, resolve_experiment_paths
 from graph_style import clamp_values, render_series
 from load_model import load_model_class
+from load_report import execute_reports
 from metadata import validate_model_metadata
 from settings import DEFAULT_SETTINGS
 
@@ -555,6 +556,7 @@ def run_batch(
                 graph_callback=graph_callback,
                 performance_callback=performance_callback,
                 result_root=result_dir,
+                report_config_path=config_path.parent / "report_config.json",
             )
             if not completed:
                 partial_output_dir = result_dir / config.get("tag", "default")
@@ -602,10 +604,19 @@ def run_batch(
             failed_rows.append((config.get("tag", "default"), str(e)))
     
     if not failed_rows:
+        active_rows = _select_active_rows(aggregate_rows, variants)
         _rebuild_all_model_artifacts(
             metadata_by_model,
-            _select_active_rows(aggregate_rows, variants),
+            active_rows,
             result_dir,
+        )
+        execute_reports(
+            config_path.parent / "report_config.json",
+            "meta",
+            config_path.parent,
+            active_rows,
+            output_dir=result_dir,
+            logger=log,
         )
     log(f"\n{'='*60}")
     log(f"Batch complete: {len(results_dirs)} simulations finished")

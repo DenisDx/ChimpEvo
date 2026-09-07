@@ -20,6 +20,7 @@ import gc
 from graph_style import clamp_values, render_series
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 from load_model import load_model_class
+from load_report import execute_reports
 from metadata import validate_model_metadata
 from experiment_manager import ExperimentNotSelectedError, resolve_experiment_paths, validate_path_component
 
@@ -122,14 +123,20 @@ def validate_runtime_config(settings, model_class=None):
 class PopulationSimulation:
     """Agent-based stochastic model: year-by-year population dynamics"""
 
-    def __init__(self, settings, result_root="result"):
+    def __init__(self, settings, result_root="result", report_config_path=None):
         """Initialize simulation with parameters
         
         Args:
             settings (dict): configuration with keys from DEFAULT_SETTINGS
             result_root: directory containing tag-specific result folders
+            report_config_path: optional experiment report configuration path
         """
         self.settings = dict(settings)
+        self.report_config_path = (
+            Path(report_config_path)
+            if report_config_path is not None
+            else Path(result_root).parent / "report_config.json"
+        )
         model_name = self.settings.get("model", "")
         model_class = load_model_class(model_name)
         self.model_metadata = validate_runtime_config(self.settings, model_class)
@@ -653,6 +660,16 @@ class PopulationSimulation:
             
             if self.stats_collected_count % graph_period == 0:
                 self._generate_year_graphs(self.year)
+                execute_reports(
+                    self.report_config_path,
+                    "annual",
+                    self.report_config_path.parent,
+                    self.results,
+                    tag=self.settings["tag"],
+                    output_dir=self.output_dir,
+                    year=self.year,
+                    logger=log,
+                )
                 self.last_generated_graph_year = self.year
             
             self.stats_collected_count += 1
@@ -880,6 +897,15 @@ class PopulationSimulation:
                         f"{graph['filename']}.gif",
                         output_dir=output_dir,
                     )
+            execute_reports(
+                self.report_config_path,
+                "final",
+                self.report_config_path.parent,
+                self.results,
+                tag=self.settings["tag"],
+                output_dir=output_dir,
+                logger=log,
+            )
         
         return str(output_dir)
 
@@ -892,6 +918,7 @@ def run_simulation(
     graph_callback=None,
     performance_callback=None,
     result_root="result",
+    report_config_path=None,
 ):
     """Main entry point for simulation from command line or batch
     
@@ -903,6 +930,7 @@ def run_simulation(
         graph_callback: optional callback receiving output directory and generated year
         performance_callback: optional callback receiving elapsed seconds, years, and processed animals
         result_root: directory containing tag-specific result folders
+        report_config_path: optional experiment report configuration path
         
     Returns:
         results (list of dicts)
@@ -915,7 +943,11 @@ def run_simulation(
         settings = config_path  # already a dict
 
     # Run simulation
-    sim = PopulationSimulation(settings, result_root=result_root)
+    sim = PopulationSimulation(
+        settings,
+        result_root=result_root,
+        report_config_path=report_config_path,
+    )
     results = sim.run(
         should_cancel=should_cancel,
         should_finalize=should_finalize,
@@ -947,4 +979,8 @@ if __name__ == "__main__":
             config_source = json.load(source_file)
         config_source["tag"] = validate_path_component(sys.argv[1], "tag")
 
-    run_simulation(config_source, result_root=paths["result_dir"])
+    run_simulation(
+        config_source,
+        result_root=paths["result_dir"],
+        report_config_path=paths["experiment_dir"] / "report_config.json",
+    )

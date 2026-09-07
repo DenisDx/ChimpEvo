@@ -110,6 +110,11 @@ adds or changes.
         """Declare no default batch CSV for the generic model."""
         return ""
 
+    @staticmethod
+    def add_report():
+        """Declare no default report configuration for the generic model."""
+        return None
+
     def _validate_population_rows(self, rows):
         """Validate tensor shape, width, dtype, and device against the schema."""
         if not isinstance(rows, torch.Tensor):

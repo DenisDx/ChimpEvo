@@ -30,7 +30,15 @@ from batch import (
 )
 from experiment_manager import ExperimentManager, archive_path, atomic_write_text
 from load_model import ModelLoadError, discover_models, load_model_class
+from load_report import (
+    ReportLoadError,
+    discover_reports,
+    execute_reports,
+    load_report_class,
+    load_report_config,
+)
 from metadata import validate_model_metadata
+from report import normalize_report_config
 from settings import DEFAULT_SETTINGS, PARAMETER_DESCRIPTIONS, PARAMETER_RANGES
 
 
@@ -402,6 +410,11 @@ class SimulationGUI:
             self.config["model"],
         )
         self._set_config_dirty(False)
+        self.available_reports = discover_reports()
+        self.report_config_path = self._report_config_path()
+        self.report_config = load_report_config(self.report_config_path)
+        self.report_selected_index = None
+        self._set_report_dirty(False)
         self._loading_ui = False
         self.simulation = None
         self.is_running = False
@@ -463,6 +476,11 @@ class SimulationGUI:
         experiment_dir = getattr(self, "experiment_dir", None)
         return experiment_dir / "result" if experiment_dir is not None else Path("result")
 
+    def _report_config_path(self):
+        """Return the active experiment's report configuration path."""
+        experiment_dir = getattr(self, "experiment_dir", None)
+        return experiment_dir / "report_config.json" if experiment_dir is not None else Path("report_config.json")
+
     def _load_config(self, file_path=None):
         """Load one JSON object merged with default settings."""
         target_file = Path(file_path or self.config_file)
@@ -501,6 +519,14 @@ class SimulationGUI:
             self.batch_dirty_var.set("Batch modified" if is_dirty else "Batch saved")
         if hasattr(self, "batch_dirty_label"):
             self.batch_dirty_label.configure(foreground="#0067c0" if is_dirty else "#666666")
+
+    def _set_report_dirty(self, is_dirty):
+        """Set report-config dirty state and synchronize its indicator."""
+        self.is_report_dirty = is_dirty
+        if hasattr(self, "report_dirty_var"):
+            self.report_dirty_var.set("Reports modified" if is_dirty else "Reports saved")
+        if hasattr(self, "report_dirty_label"):
+            self.report_dirty_label.configure(foreground="#0067c0" if is_dirty else "#666666")
 
     def _mark_config_dirty(self, *args):
         """Mark configuration memory as modified by an editable control."""
@@ -628,6 +654,11 @@ class SimulationGUI:
         self.notebook.add(batch_frame, text="Batch")
         self.batch_tab = batch_frame
         self._create_batch_tab(batch_frame)
+
+        reports_frame = ttk.Frame(self.notebook)
+        self.notebook.add(reports_frame, text="Reports")
+        self.reports_tab = reports_frame
+        self._create_reports_tab(reports_frame)
         
         self._create_progress_window()
 
@@ -794,11 +825,15 @@ class SimulationGUI:
             **{name: details["default"] for name, details in metadata["settings"].items()},
             "model": model_name,
         }
+        report_config = model_class.add_report()
+        if report_config is not None:
+            report_config = normalize_report_config(report_config)
         experiment_dir = self.experiment_manager.create_experiment(
             experiment_name,
             config,
             model_class.add_batch(),
             activate=False,
+            report_config=report_config,
         )
         return experiment_dir
 
@@ -1164,11 +1199,11 @@ class SimulationGUI:
 
     def _confirm_experiment_transition(self):
         """Resolve unsaved config and batch changes before leaving an experiment."""
-        if not self.is_config_dirty and not self.is_batch_dirty:
+        if not self.is_config_dirty and not self.is_batch_dirty and not self.is_report_dirty:
             return True
         choice = messagebox.askyesnocancel(
             "Unsaved changes",
-            "Configuration or batch data for experiment "
+            "Configuration, batch, or report data for experiment "
             f"'{self.experiment_manager.get_active_experiment_name() or self.experiment_var.get()}' was modified. "
             "Save changes before leaving it?",
         )
@@ -1181,6 +1216,7 @@ class SimulationGUI:
                 return False
             self._save_config()
             self._save_batch_csv()
+            self._save_reports()
         except (OSError, ValueError) as error:
             messagebox.showerror("Experiment error", str(error))
             return False
@@ -1196,11 +1232,16 @@ class SimulationGUI:
         self.config = config
         self.model_metadata = metadata
         self._set_config_dirty(False)
+        self.report_config_path = self._report_config_path()
+        self.report_config = load_report_config(self.report_config_path)
+        self.report_selected_index = None
+        self._set_report_dirty(False)
         self._rebuild_model_settings_grid()
         self._rebuild_dynamic_graph_tabs()
         self.batch_column_selector.configure(values=self._batch_column_options(metadata))
         self._load_config_to_ui()
         self._load_batch_csv(batch_path)
+        self._render_report_list()
         self.experiment_manager.set_active_experiment(target_name)
         self.batch_status_var.set(f"Ready: {self._aggregate_result_count()} completed")
 
@@ -1408,6 +1449,269 @@ class SimulationGUI:
     def _hide_progress_window(self):
         """Hide the progress window without discarding its current state."""
         self.progress_window.withdraw()
+
+    def _create_reports_tab(self, parent):
+        """Create the report-instance list and selected-item settings editor."""
+        list_frame = ttk.LabelFrame(parent, text="Configured Reports", padding=8)
+        list_frame.pack(fill=tk.X, padx=5, pady=5)
+        self.report_listbox = tk.Listbox(list_frame, height=6, exportselection=False)
+        self.report_listbox.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.report_listbox.bind("<<ListboxSelect>>", self._on_report_selected)
+        controls = ttk.Frame(list_frame)
+        controls.pack(side=tk.LEFT, fill=tk.Y, padx=(8, 0))
+        self.report_selector_var = tk.StringVar()
+        self.report_selector = ttk.Combobox(
+            controls,
+            textvariable=self.report_selector_var,
+            values=self.available_reports,
+            state="readonly",
+            width=28,
+        )
+        self.report_selector.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(controls, text="Add", command=self._add_report_item).pack(fill=tk.X, pady=2)
+        ttk.Button(controls, text="Duplicate", command=self._duplicate_report_item).pack(fill=tk.X, pady=2)
+        ttk.Button(controls, text="Remove", command=self._remove_report_item).pack(fill=tk.X, pady=2)
+
+        self.report_settings_frame = ttk.LabelFrame(parent, text="Report Settings", padding=10)
+        self.report_settings_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.report_item_rows = {}
+
+        action_frame = ttk.Frame(parent)
+        action_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        self.report_dirty_var = tk.StringVar(value="Reports saved")
+        self.report_dirty_label = ttk.Label(action_frame, textvariable=self.report_dirty_var, foreground="#666666")
+        self.report_dirty_label.pack(side=tk.LEFT)
+        ttk.Button(action_frame, text="Save Reports", command=self._on_save_reports).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(action_frame, text="Re-read Reports", command=self._on_reread_reports).pack(side=tk.LEFT, padx=5)
+        ttk.Button(action_frame, text="Open Selected", command=self._open_selected_report).pack(side=tk.RIGHT)
+        ttk.Button(action_frame, text="Generate Selected", command=self._generate_selected_report).pack(side=tk.RIGHT)
+        ttk.Button(action_frame, text="Generate Meta", command=self._generate_meta_reports).pack(side=tk.RIGHT, padx=5)
+        self._render_report_list()
+
+    def _report_field_options(self):
+        """Return known aggregate result columns suitable for report dimensions."""
+        excluded = {"model", "config_signature", "tag"}
+        names = set(DEFAULT_SETTINGS) | set(self.model_metadata["settings"]) | set(self.model_metadata["values"])
+        names.update(self.batch_columns if hasattr(self, "batch_columns") else ())
+        return sorted(name for name in names if name not in excluded)
+
+    def _render_report_list(self):
+        """Render report instances and retain the current selected item when possible."""
+        selected_index = self.report_selected_index
+        self.report_listbox.delete(0, tk.END)
+        for index, item in enumerate(self.report_config["items"]):
+            name = item.get("report", "") or "Unnamed report"
+            label = item.get("title") or item.get("filename", "")
+            self.report_listbox.insert(tk.END, f"{name}: {label}")
+        if selected_index is not None and selected_index < len(self.report_config["items"]):
+            self.report_listbox.selection_set(selected_index)
+            self.report_listbox.activate(selected_index)
+        elif self.report_config["items"]:
+            self.report_selected_index = 0
+            self.report_listbox.selection_set(0)
+        else:
+            self.report_selected_index = None
+        self._rebuild_report_settings()
+
+    def _store_report_editor(self):
+        """Copy the selected report form values into the in-memory configuration."""
+        if self.report_selected_index is None:
+            return
+        item = self.report_config["items"][self.report_selected_index]
+        for name, row in self.report_item_rows.items():
+            item[name] = row["value"].get()
+
+    def _on_report_selected(self, event=None):
+        """Select one report item and rebuild its settings form."""
+        selection = self.report_listbox.curselection()
+        if not selection:
+            return
+        self._store_report_editor()
+        self.report_selected_index = selection[0]
+        self._rebuild_report_settings()
+
+    def _rebuild_report_settings(self):
+        """Render editable fields and declared descriptions for the selected report."""
+        for widget in self.report_settings_frame.winfo_children():
+            widget.destroy()
+        self.report_item_rows = {}
+        if self.report_selected_index is None:
+            ttk.Label(self.report_settings_frame, text="Add or select a report.").pack(anchor=tk.W)
+            return
+        item = self.report_config["items"][self.report_selected_index]
+        try:
+            descriptions = load_report_class(item["report"]).config_descriptions()
+        except ReportLoadError:
+            descriptions = {}
+        ttk.Label(self.report_settings_frame, text="Name", font=("TkDefaultFont", 9, "bold")).grid(row=0, column=0, sticky=tk.W, padx=4)
+        ttk.Label(self.report_settings_frame, text="Value", font=("TkDefaultFont", 9, "bold")).grid(row=0, column=1, sticky=tk.W, padx=4)
+        ttk.Label(self.report_settings_frame, text="Description", font=("TkDefaultFont", 9, "bold")).grid(row=0, column=2, sticky=tk.W, padx=4)
+        row_index = 1
+        options = self._report_field_options()
+        for name, initial_value in item.items():
+            value = tk.BooleanVar(value=initial_value) if isinstance(initial_value, bool) else tk.StringVar(value=str(initial_value))
+            value.trace_add("write", lambda *_: self._set_report_dirty(True))
+            description = descriptions.get(name, "")
+            ttk.Label(self.report_settings_frame, text=name, width=20).grid(row=row_index, column=0, sticky=tk.W, padx=4, pady=2)
+            if isinstance(initial_value, bool):
+                widget = ttk.Checkbutton(self.report_settings_frame, variable=value)
+            elif name.startswith("value"):
+                widget = ttk.Combobox(self.report_settings_frame, textvariable=value, values=options, state="normal", width=30)
+            else:
+                widget = ttk.Entry(self.report_settings_frame, textvariable=value, width=32, state=tk.DISABLED if name == "report" else tk.NORMAL)
+            widget.grid(row=row_index, column=1, sticky=tk.W, padx=4, pady=2)
+            description_label = ttk.Label(self.report_settings_frame, text=description, wraplength=450)
+            description_label.grid(row=row_index, column=2, sticky=tk.W, padx=4, pady=2)
+            for tooltip_widget in (widget, description_label):
+                self.tooltips.register(tooltip_widget, description)
+            self.report_item_rows[name] = {"value": value}
+            row_index += 1
+
+    def _add_report_item(self):
+        """Append the selected report plugin's default configuration item."""
+        report_name = self.report_selector_var.get()
+        if not report_name:
+            messagebox.showwarning("Reports", "Select a report to add.")
+            return
+        try:
+            item = load_report_class(report_name).add_config()
+        except ReportLoadError as error:
+            messagebox.showerror("Reports", str(error))
+            return
+        self._store_report_editor()
+        self.report_config["items"].append(item)
+        self.report_selected_index = len(self.report_config["items"]) - 1
+        self._set_report_dirty(True)
+        self._render_report_list()
+
+    def _duplicate_report_item(self):
+        """Duplicate the selected report item for independent editing."""
+        if self.report_selected_index is None:
+            return
+        self._store_report_editor()
+        item = json.loads(json.dumps(self.report_config["items"][self.report_selected_index]))
+        self.report_config["items"].insert(self.report_selected_index + 1, item)
+        self.report_selected_index += 1
+        self._set_report_dirty(True)
+        self._render_report_list()
+
+    def _remove_report_item(self):
+        """Remove the selected report item from the in-memory configuration."""
+        if self.report_selected_index is None:
+            return
+        del self.report_config["items"][self.report_selected_index]
+        if self.report_selected_index >= len(self.report_config["items"]):
+            self.report_selected_index = len(self.report_config["items"]) - 1
+        self._set_report_dirty(True)
+        self._render_report_list()
+
+    def _save_reports(self):
+        """Validate and atomically save the current report configuration."""
+        self._store_report_editor()
+        self.report_config = normalize_report_config(self.report_config)
+        for item in self.report_config["items"]:
+            load_report_class(item["report"])
+        atomic_write_text(self.report_config_path, json.dumps(self.report_config, indent=2))
+        self._set_report_dirty(False)
+
+    def _on_save_reports(self):
+        """Save reports and show validation errors in the GUI."""
+        try:
+            self._save_reports()
+        except (OSError, ValueError, ReportLoadError) as error:
+            messagebox.showerror("Reports", str(error))
+            return
+        messagebox.showinfo("Reports", "Report configuration saved")
+
+    def _on_reread_reports(self):
+        """Discard report edits and reload the experiment report configuration."""
+        if self.is_report_dirty and not messagebox.askyesno("Discard report changes", "Discard unsaved report changes and re-read report_config.json?"):
+            return
+        try:
+            self.report_config = load_report_config(self.report_config_path)
+        except ReportLoadError as error:
+            messagebox.showerror("Reports", str(error))
+            return
+        self.report_selected_index = None
+        self._set_report_dirty(False)
+        self._render_report_list()
+
+    def _read_report_rows(self, path):
+        """Read one report CSV into dictionaries, rejecting a missing source file."""
+        if not path.is_file():
+            raise ValueError(f"Result file not found: {path}")
+        with path.open(newline="", encoding="utf-8") as result_file:
+            return list(csv.DictReader(result_file))
+
+    def _generate_meta_reports(self):
+        """Regenerate all meta-enabled reports from aggregate batch results."""
+        try:
+            self._save_reports()
+            paths = execute_reports(self.report_config_path, "meta", self.report_config_path.parent, self._read_report_rows(self._result_root() / "result.csv"), output_dir=self._result_root(), logger=log)
+        except (OSError, ValueError, ReportLoadError) as error:
+            messagebox.showerror("Reports", str(error))
+            return
+        messagebox.showinfo("Reports", f"Generated {len(paths)} report(s)")
+
+    def _generate_selected_report(self):
+        """Regenerate the selected meta report, or a final report for the current tag."""
+        if self.report_selected_index is None:
+            messagebox.showwarning("Reports", "Select a report.")
+            return
+        try:
+            self._save_reports()
+            item = self.report_config["items"][self.report_selected_index]
+            trigger = "meta" if item["meta"] else "final" if item["final"] else None
+            if trigger is None:
+                raise ValueError("Selected report must enable meta or final generation")
+            output_dir = self._result_root() if trigger == "meta" else self._result_root() / self.config["tag"]
+            result_path = self._result_root() / "result.csv" if trigger == "meta" else output_dir / "result.csv"
+            paths = execute_reports(self.report_config_path, trigger, self.report_config_path.parent, self._read_report_rows(result_path), tag=None if trigger == "meta" else self.config["tag"], output_dir=output_dir, selected_index=self.report_selected_index, logger=log)
+        except (OSError, ValueError, ReportLoadError) as error:
+            messagebox.showerror("Reports", str(error))
+            return
+        messagebox.showinfo("Reports", f"Generated {len(paths)} report(s)")
+
+    def _open_selected_report(self):
+        """Open the newest generated file belonging to the selected report item."""
+        if self.report_selected_index is None:
+            messagebox.showwarning("Reports", "Select a report.")
+            return
+        self._store_report_editor()
+        item = self.report_config["items"][self.report_selected_index]
+        filename = item.get("filename", "").strip()
+        if not filename:
+            messagebox.showerror("Reports", "Selected report has no output filename.")
+            return
+        if item.get("meta", False):
+            output_dir = self._result_root()
+            candidates = [output_dir / f"{filename}.pdf"]
+        elif item.get("final", False):
+            output_dir = self._result_root() / self.config["tag"]
+            candidates = [output_dir / f"{filename}.pdf"]
+        elif item.get("annual", False):
+            output_dir = self._result_root() / self.config["tag"]
+            candidates = sorted(
+                output_dir.glob(f"{filename}_*.pdf"),
+                key=lambda path: path.stat().st_mtime,
+                reverse=True,
+            )
+        else:
+            messagebox.showerror("Reports", "Selected report has no enabled generation mode.")
+            return
+        output_path = next((path for path in candidates if path.is_file()), None)
+        if output_path is None:
+            messagebox.showwarning("Reports", f"No generated report found in {output_dir}.")
+            return
+        try:
+            if sys.platform == "win32":
+                os.startfile(output_path)
+            elif sys.platform == "darwin":
+                subprocess.Popen(["open", str(output_path)])
+            else:
+                subprocess.Popen(["xdg-open", str(output_path)])
+        except OSError as error:
+            messagebox.showerror("Open Report", f"Could not open {output_path}:\n{error}")
 
     def _create_batch_tab(self, parent):
         """Create the editable in-memory batch CSV table."""
@@ -1948,9 +2252,15 @@ class SimulationGUI:
         batch_text = model_class.add_batch()
         if batch_text:
             self._load_batch_text(batch_text)
+        report_config = model_class.add_report()
+        if report_config is not None:
+            self.report_config = normalize_report_config(report_config)
+            self.report_selected_index = None
+            self._set_report_dirty(True)
+            self._render_report_list()
         messagebox.showinfo(
             "Model defaults loaded",
-            "Model settings and batch defaults are loaded in memory. Save configuration and batch changes explicitly.",
+            "Model settings, batch defaults, and report defaults are loaded in memory. Save changes explicitly.",
         )
 
     def _rebuild_dynamic_graph_tabs(self):
@@ -2490,6 +2800,7 @@ class SimulationGUI:
             )
         if model_name != previous_model:
             self._offer_model_batch_defaults(model_name)
+            self._offer_model_report_defaults(model_name)
 
     def _offer_model_batch_defaults(self, model_name):
         """Offer unsaved batch defaults when a newly selected model provides them."""
@@ -2502,6 +2813,25 @@ class SimulationGUI:
             "Replace the in-memory batch table with defaults from the selected model?",
         ):
             self._load_batch_text(batch_text)
+
+    def _offer_model_report_defaults(self, model_name):
+        """Offer report defaults when a newly selected model provides them."""
+        report_config = load_model_class(model_name).add_report()
+        if report_config is None:
+            return
+        try:
+            report_config = normalize_report_config(report_config)
+        except ValueError as error:
+            messagebox.showerror("Report defaults", str(error))
+            return
+        if messagebox.askyesno(
+            "Replace report defaults",
+            "Replace the in-memory report configuration with defaults from the selected model?",
+        ):
+            self.report_config = report_config
+            self.report_selected_index = None
+            self._set_report_dirty(True)
+            self._render_report_list()
 
     def _parse_setting_value(self, name, value_text, metadata):
         """Parse one setting string according to declared metadata."""

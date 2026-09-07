@@ -92,7 +92,14 @@ class ExperimentManager:
         """Reject unsafe or non-portable experiment directory names."""
         validate_path_component(experiment_name, "Experiment name")
 
-    def create_experiment(self, experiment_name, config, batch_text=None, activate=True):
+    def create_experiment(
+        self,
+        experiment_name,
+        config,
+        batch_text=None,
+        activate=True,
+        report_config=None,
+    ):
         """Create one complete experiment and optionally select it after all writes succeed."""
         self.validate_experiment_name(experiment_name)
         experiment_dir = self.project_root / self.data_dir_name / experiment_name
@@ -103,6 +110,11 @@ class ExperimentManager:
             atomic_write_text(experiment_dir / "config.json", json.dumps(config, indent=2))
             if batch_text:
                 atomic_write_text(experiment_dir / "multi.csv", batch_text.rstrip() + "\n")
+            if report_config is not None:
+                atomic_write_text(
+                    experiment_dir / "report_config.json",
+                    json.dumps(report_config, indent=2),
+                )
             if activate:
                 self.set_active_experiment(experiment_name)
         except Exception:
@@ -136,6 +148,9 @@ class ExperimentManager:
             source_batch = source_dir / "multi.csv"
             if source_batch.is_file():
                 shutil.copy2(source_batch, target_dir / "multi.csv")
+            source_reports = source_dir / "report_config.json"
+            if source_reports.is_file():
+                shutil.copy2(source_reports, target_dir / "report_config.json")
             source_results = source_dir / "result"
             if copy_results and source_results.is_dir():
                 shutil.copytree(source_results, target_dir / "result")

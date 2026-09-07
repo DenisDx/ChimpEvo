@@ -13,6 +13,7 @@ The application features:
 - **Core simulation engine** (Python + PyTorch) for efficient population dynamics
 - **Graphical interface** (Tkinter) for interactive parameter control and visualization
 - **Batch processing** for parameter sweeps and multiple runs
+- **Dynamic reports** from trusted `report_*.py` plugins
 - **Cross-platform support** (Windows, Linux, macOS with CUDA acceleration on Linux/Windows)
 
 ## Mathematical Model
@@ -141,22 +142,31 @@ python gui.py
 ```
 
 Opens a window where you can:
-- Create, clone, switch, and confirm deletion of experiments stored under `data/<experiment>/`. Cloning copies the saved `config.json` and optional `multi.csv` byte for byte, can optionally copy the current non-empty `result/` directory, excludes result backup archives, and activates the completed clone.
+- Create, clone, switch, and confirm deletion of experiments stored under `data/<experiment>/`. Cloning copies the saved `config.json`, optional `multi.csv`, and optional `report_config.json` byte for byte, can optionally copy the current non-empty `result/` directory, excludes result backup archives, and activates the completed clone.
 - Edit all simulation parameters with real-time validation (organized in Settings tab)
 - Select CPU or CUDA accelerated computation
 - Start/stop simulations (opens the non-modal Progress window once at calculation start)
 - View live statistics, logs, and generated graphs
 - Save/load configurations from JSON files
 
-The main GUI features two tabs:
+The main GUI features three tabs:
 1. **Settings**: Parameter input fields, device selection, save/load config
 2. **Batch**: Editable batch CSV, aggregate progress, Start/Stop controls, and result cleanup
+3. **Reports**: Configured report list, selected-report settings with field descriptions, save/re-read, and manual generation controls
 
 The separate non-modal **Progress** window contains current-run tag/source details, real-time logs, performance statistics, legacy graphs, model-declared graph tabs, and calculation controls. **Stop Simulation** cancels and keeps partial output. **Finalize Simulation** completes the current simulation successfully at the end of its current year and writes final outputs. During batch execution, finalizing completes the current row and then stops the batch before the next row. Progress opens once at single or batch launch; later batch rows and graph updates do not raise or reopen it after it is hidden. Batch runs show the complete active CSV row; single runs show `Default config`. Use **Show Progress Window** to open it at any time. **Auto-scroll log** controls whether new messages move the log to its end. Closing Progress hides it without interrupting a calculation or discarding its current display.
 
 The Settings tab contains the simulation and configuration actions and can load a selected model or all active model defaults into memory. **About Model...** opens the selected model's structured description in a modal window. Hover hints briefly explain buttons, configuration fields using their declared descriptions, and state indicators. Separate top-panel indicators show config and batch dirty state in blue. Switching experiments offers save, discard, or cancel when either editor has unsaved changes and identifies the experiment being left.
 
-On first launch, the GUI opens a New Experiment form with an experiment-name field and a model selector populated from the discovered models. The form renders the selected model's purpose, inheritance, main rules, and differences using lightweight Markdown. The selected model supplies its default settings and optional default batch CSV. `default.conf` stores only the active experiment name. Cancelling initial creation closes the GUI without creating project data.
+On first launch, the GUI opens a New Experiment form with an experiment-name field and a model selector populated from the discovered models. The form renders the selected model's purpose, inheritance, main rules, and differences using lightweight Markdown. The selected model supplies its default settings, optional default batch CSV, and optional report configuration. `default.conf` stores only the active experiment name. Cancelling initial creation closes the GUI without creating project data.
+
+### Reports
+
+Each experiment may contain `report_config.json`. Its `items` list contains independent report instances, so the same report can be configured more than once. If the file is absent, no reports run. Trusted plugins are discovered from `report_*.py`; each defines a `Report_<name>` subclass of `Report` and supplies `add_config()` defaults.
+
+An item has `report`, `filename`, and boolean `annual`, `final`, and `meta` flags. Annual reports receive the current annual rows and write inside the tag result directory with a year suffix. Final reports receive all rows from one successful run and write inside that tag directory. Meta reports receive `data/<experiment>/result/result.csv` after a successful batch and write at the aggregate result root. A report error is logged without invalidating a completed calculation.
+
+The bundled `report_heatmap` creates a PDF from meta aggregate rows. It renders `value` over four configurable dimensions (`value1` through `value4`), uses a shared color scale, and accepts an optional JSON range filter such as `{"lambda": [0.01, 0.05]}`.
 
 ### 2. Single Simulation (Console)
 
