@@ -72,16 +72,90 @@ def test_allele_model_clamps_individual_beta_and_delta_contributions():
 
 @pytest.mark.smoke
 def test_allele_model_statistics_stay_scalar_and_memory_estimate_includes_options():
-    """Compute declared allele aggregates and scale memory by active field count."""
+    """Compute declared standard deviations and scale memory by active field count."""
     settings = make_settings(N_alleles=2, use_dominance=True, delta_x=1.0, max_population=10)
     model = Model_alleles(settings, torch.device("cpu"))
     model.initialize_population()
     values = model.get_values()
 
-    assert values["avg_allele_beta_variance"] == 0.0
-    assert values["avg_dominant_beta_variance"] == 0.0
+    standard_deviation_names = [
+        "allele_beta_standard_deviation",
+        "dominant_allele_beta_standard_deviation",
+        "recessive_allele_beta_standard_deviation",
+        "avg_individual_allele_beta_standard_deviation",
+        "avg_individual_dominant_allele_beta_standard_deviation",
+        "avg_individual_recessive_allele_beta_standard_deviation",
+    ]
+    assert all(values[name] == 0.0 for name in standard_deviation_names)
     assert values["avg_delta"] == 0.0
     assert Model_alleles.get_estimated_memory_consumption(settings) == 10 * 14 * 4 * 2
+
+
+@pytest.mark.smoke
+def test_allele_standard_deviation_triples_match_without_dominance():
+    """Use the complete allele set for every standard deviation without dominance."""
+    model = Model_alleles(make_settings(N_alleles=2), torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 0.0, 1.0, 3.0, 5.0, 7.0],
+        [2.0, 0.0, 2.0, 4.0, 6.0, 8.0],
+    ]))
+
+    values = model.get_values()
+
+    assert values["allele_beta_standard_deviation"] == pytest.approx(
+        values["dominant_allele_beta_standard_deviation"],
+    )
+    assert values["allele_beta_standard_deviation"] == pytest.approx(
+        values["recessive_allele_beta_standard_deviation"],
+    )
+    assert values["avg_individual_allele_beta_standard_deviation"] == pytest.approx(
+        values["avg_individual_dominant_allele_beta_standard_deviation"],
+    )
+    assert values["avg_individual_allele_beta_standard_deviation"] == pytest.approx(
+        values["avg_individual_recessive_allele_beta_standard_deviation"],
+    )
+
+
+@pytest.mark.smoke
+def test_allele_standard_deviation_uses_float64_for_large_raw_alleles():
+    """Keep standard deviation finite when float32 allele squares would overflow."""
+    model = Model_alleles(make_settings(N_alleles=1), torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 0.0, 1.0e20, 0.0],
+        [2.0, 0.0, 0.0, 0.0],
+    ]))
+
+    values = model.get_values()
+
+    assert values["allele_beta_standard_deviation"] == pytest.approx(4.330127e19)
+    assert values["avg_individual_allele_beta_standard_deviation"] == pytest.approx(2.5e19)
+
+
+@pytest.mark.smoke
+def test_allele_model_reports_dominant_and_recessive_beta_and_delta_extremes():
+    """Separate raw beta and delta aggregate values by within-locus dominance."""
+    model = Model_alleles(make_settings(
+        N_alleles=2,
+        use_dominance=True,
+        delta_x=1.0,
+    ), torch.device("cpu"))
+    model._set_population(torch.tensor([[
+        2.0, 0.0,
+        1.0, 3.0, 5.0, 7.0,
+        3.0, 1.0, 2.0, 4.0,
+        2.0, 4.0, 6.0, 8.0,
+    ]]))
+
+    values = model.get_values()
+
+    assert values["dominant_allele_beta_min"] == 1.0
+    assert values["dominant_allele_beta_max"] == 7.0
+    assert values["recessive_allele_beta_min"] == 3.0
+    assert values["recessive_allele_beta_max"] == 5.0
+    assert values["dominant_delta_max"] == 8.0
+    assert values["recessive_delta_max"] == 6.0
+    assert values["dominant_delta_mean"] == pytest.approx(5.0)
+    assert values["recessive_delta_mean"] == pytest.approx(5.0)
 
 
 @pytest.mark.smoke

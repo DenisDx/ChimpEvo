@@ -146,12 +146,16 @@ this mode.
 
 ## Statistics
 
-Alongside inherited population statistics, the model reports the mean
-within-animal variance of all beta alleles. Dominance mode additionally reports
-the corresponding dominant-allele variance and dominance aggregates. Delta
-mode reports mean delta and the mean count of high-delta alleles. These values
-are reduced on the selected Torch device; only final scalar results are moved
-to Python for output.
+Alongside inherited population statistics, the model reports standard
+deviations of raw beta alleles across the whole population and averaged within
+each animal. Each form is reported for all, dominant, and recessive alleles.
+When dominance is disabled, all three variants use all beta alleles and are
+equal. Standard deviations use float64 reductions on the selected Torch device
+to avoid float32 variance overflow from large multiplicative mutation outliers.
+It also reports raw beta minima and maxima separately for dominant and
+recessive alleles. Delta mode reports dominant and recessive delta means and
+maxima, mean delta, and the mean count of high-delta alleles. Only final scalar
+results are moved to Python for output.
 """
 
     @staticmethod
@@ -202,12 +206,24 @@ to Python for output.
         """Declare aggregate allele statistics alongside inherited scalar results."""
         return {
             **Model_base_z.add_values(),
-            "avg_allele_beta_variance": {"title": "Average allele beta variance", "annual": True, "final": True, "format": ".6f"},
-            "avg_dominant_beta_variance": {"title": "Average dominant beta variance", "annual": True, "final": True, "format": ".6f"},
+            "allele_beta_standard_deviation": {"title": "All allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "dominant_allele_beta_standard_deviation": {"title": "Dominant allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "recessive_allele_beta_standard_deviation": {"title": "Recessive allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "avg_individual_allele_beta_standard_deviation": {"title": "Average individual all-allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "avg_individual_dominant_allele_beta_standard_deviation": {"title": "Average individual dominant allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "avg_individual_recessive_allele_beta_standard_deviation": {"title": "Average individual recessive allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
+            "dominant_allele_beta_min": {"title": "Dominant allele beta minimum", "annual": True, "final": True, "format": ".6f"},
+            "dominant_allele_beta_max": {"title": "Dominant allele beta maximum", "annual": True, "final": True, "format": ".6f"},
+            "recessive_allele_beta_min": {"title": "Recessive allele beta minimum", "annual": True, "final": True, "format": ".6f"},
+            "recessive_allele_beta_max": {"title": "Recessive allele beta maximum", "annual": True, "final": True, "format": ".6f"},
             "avg_dominance": {"title": "Average dominance", "annual": True, "final": True, "format": ".4f"},
             "dominance_variance": {"title": "Dominance variance", "annual": True, "final": True, "format": ".6f"},
             "avg_delta": {"title": "Average delta", "annual": True, "final": True, "format": ".4f"},
             "avg_high_delta_alleles": {"title": "Average high-delta alleles", "annual": True, "final": True, "format": ".4f"},
+            "dominant_delta_max": {"title": "Dominant delta maximum", "annual": True, "final": True, "format": ".4f"},
+            "recessive_delta_max": {"title": "Recessive delta maximum", "annual": True, "final": True, "format": ".4f"},
+            "dominant_delta_mean": {"title": "Dominant delta mean", "annual": True, "final": True, "format": ".4f"},
+            "recessive_delta_mean": {"title": "Recessive delta mean", "annual": True, "final": True, "format": ".4f"},
         }
 
     @staticmethod
@@ -369,23 +385,79 @@ to Python for output.
     def get_values(self):
         """Return inherited values plus device-side allele aggregate statistics."""
         values = super().get_values()
-        empty = {"avg_allele_beta_variance": None, "avg_dominant_beta_variance": None, "avg_dominance": None, "dominance_variance": None, "avg_delta": None, "avg_high_delta_alleles": None}
+        empty = {
+            "allele_beta_standard_deviation": None,
+            "dominant_allele_beta_standard_deviation": None,
+            "recessive_allele_beta_standard_deviation": None,
+            "avg_individual_allele_beta_standard_deviation": None,
+            "avg_individual_dominant_allele_beta_standard_deviation": None,
+            "avg_individual_recessive_allele_beta_standard_deviation": None,
+            "dominant_allele_beta_min": None,
+            "dominant_allele_beta_max": None,
+            "recessive_allele_beta_min": None,
+            "recessive_allele_beta_max": None,
+            "avg_dominance": None,
+            "dominance_variance": None,
+            "avg_delta": None,
+            "avg_high_delta_alleles": None,
+            "dominant_delta_max": None,
+            "recessive_delta_max": None,
+            "dominant_delta_mean": None,
+            "recessive_delta_mean": None,
+        }
         if not self.get_population_size():
             values.update(empty)
             return values
-        all_betas = torch.cat([self._alleles("beta1"), self._alleles("beta2")], dim=1)
         values.update(empty)
-        values["avg_allele_beta_variance"] = torch.var(all_betas, dim=1, correction=0).mean().item()
+        beta1 = self._alleles("beta1")
+        beta2 = self._alleles("beta2")
+        all_betas = torch.cat([beta1, beta2], dim=1).to(torch.float64)
         if self.settings["use_dominance"]:
-            dominant, _ = self._selected_alleles()
+            choose_first = self._alleles("dom1") > self._alleles("dom2")
+            dominant_betas = torch.where(choose_first, beta1, beta2).to(torch.float64)
+            recessive_betas = torch.where(choose_first, beta2, beta1).to(torch.float64)
+        else:
+            dominant_betas = all_betas
+            recessive_betas = all_betas
+        values["dominant_allele_beta_min"] = dominant_betas.min().item()
+        values["dominant_allele_beta_max"] = dominant_betas.max().item()
+        values["recessive_allele_beta_min"] = recessive_betas.min().item()
+        values["recessive_allele_beta_max"] = recessive_betas.max().item()
+        standard_deviation_sets = {
+            "allele_beta_standard_deviation": all_betas,
+            "dominant_allele_beta_standard_deviation": dominant_betas,
+            "recessive_allele_beta_standard_deviation": recessive_betas,
+        }
+        for name, betas in standard_deviation_sets.items():
+            values[name] = torch.std(betas, correction=0).item()
+        individual_standard_deviation_sets = {
+            "avg_individual_allele_beta_standard_deviation": all_betas,
+            "avg_individual_dominant_allele_beta_standard_deviation": dominant_betas,
+            "avg_individual_recessive_allele_beta_standard_deviation": recessive_betas,
+        }
+        for name, betas in individual_standard_deviation_sets.items():
+            values[name] = torch.std(betas, dim=1, correction=0).mean().item()
+        if self.settings["use_dominance"]:
             dominance = torch.cat([self._alleles("dom1"), self._alleles("dom2")], dim=1)
-            values["avg_dominant_beta_variance"] = torch.var(dominant, dim=1, correction=0).mean().item()
             dominance_variance, average_dominance = torch.var_mean(dominance, correction=0)
             values["avg_dominance"] = average_dominance.item()
             values["dominance_variance"] = dominance_variance.item()
         if self.settings["delta_x"] != 0.0:
-            deltas = torch.cat([self._alleles("delta1"), self._alleles("delta2")], dim=1)
+            delta1 = self._alleles("delta1")
+            delta2 = self._alleles("delta2")
+            deltas = torch.cat([delta1, delta2], dim=1)
+            if self.settings["use_dominance"]:
+                choose_first = self._alleles("dom1") > self._alleles("dom2")
+                dominant_deltas = torch.where(choose_first, delta1, delta2)
+                recessive_deltas = torch.where(choose_first, delta2, delta1)
+            else:
+                dominant_deltas = deltas
+                recessive_deltas = deltas
             values["avg_delta"] = deltas.mean().item()
             threshold = self.settings["delta_reversion"] * 0.5 if self.settings["delta_reversion"] else 0.0
             values["avg_high_delta_alleles"] = (deltas > threshold).sum(dim=1).float().mean().item()
+            values["dominant_delta_max"] = dominant_deltas.max().item()
+            values["recessive_delta_max"] = recessive_deltas.max().item()
+            values["dominant_delta_mean"] = dominant_deltas.mean().item()
+            values["recessive_delta_mean"] = recessive_deltas.mean().item()
         return values
