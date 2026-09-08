@@ -42,10 +42,19 @@ models, and any other brief operational notes.
 - **Codominance:** The stored phenotype is $beta=(beta1+beta2)/2$. Both allele sets contribute equally because beta represents the aggregate behavior of many genes rather than dominance at a single gene.
 - **Compatibility:** Population rows keep public `beta` at column 1 and store private `beta1` and `beta2` after it. Mortality, beta statistics, graphs, and stabilization remain inherited and consume the stored phenotype.
 
+## model_base_diploid_m
+
+- **Purpose:** Study diploid beta inheritance with proportional, asymmetric X/S/Z mutations.
+- **Key settings:** $X$ is the base relative magnitude, $S$ sets directional magnitude asymmetry, and $Z$ sets multiplication probability $(Z+1)/2$.
+- **Inheritance:** A child independently receives one random allele from each parent. Each inherited allele has its own mutation check and direction draw.
+- **Mutation:** A mutated allele is multiplied by $1+X(S+1)$, or divided by $1+X(1-S)$. At $S=0$, this becomes multiplication or division by $1+X$.
+- **Codominance:** The stored phenotype is $beta=(beta1+beta2)/2$ after both possible allele mutations. `beta_only_positive` is unavailable, so negative beta alleles remain valid.
+
 ## model_alleles
 
 - **Purpose:** Simulate `N_alleles` independent diploid beta loci with optional dominance and allele-specific delayed age effects.
-- **Key settings:** `N_alleles`, `delta_x`, `delta_reversion`, and `use_dominance`; inherited `mutation_probability`, $X$, $S$, $Z$, and `beta_only_positive` remain available in batch configurations.
+- **Key settings:** `N_alleles`, `delta_x`, `delta_reversion`, `use_dominance`, and `use_multiplication`; inherited `mutation_probability`, $X$, $S$, $Z$, and `beta_only_positive` remain available in batch configurations.
 - **Inheritance:** Every child independently takes one allele at each locus from each parent. One mutation check per inherited allele jointly updates beta and its optional dominance/delta attributes.
+- **Beta mutation:** `use_multiplication=false` retains additive X/S/Z shifts. When true, $Z$ selects multiplication with probability $(Z+1)/2$; a beta allele is multiplied by $1+X(S+1)$ or divided by $1+X(1-S)$.
 - **Phenotype:** Without delta, public beta is the mean of all alleles or the selected dominant allele per pair. With delta, the model recalculates an effective beta before mortality from $beta_i(t-delta_i)/t$. This is an effective-beta approximation, not an average of per-allele mortality probabilities.
 - **Compatibility:** The public `age` and `beta` fields remain first; all dynamic allele fields are private and are not written as CSV columns.

@@ -1,6 +1,7 @@
 import pytest
 import torch
 
+import model_alleles as alleles_module
 from model_alleles import Model_alleles
 from settings import DEFAULT_SETTINGS
 
@@ -81,3 +82,103 @@ def test_allele_model_statistics_stay_scalar_and_memory_estimate_includes_option
     assert values["avg_dominant_beta_variance"] == 0.0
     assert values["avg_delta"] == 0.0
     assert Model_alleles.get_estimated_memory_consumption(settings) == 10 * 14 * 4 * 2
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize(
+    ("mutation_s", "mutation_z", "expected_alleles"),
+    [
+        (0.5, 1.0, [5.0, 10.0]),
+        (-0.5, -1.0, [0.8, 1.6]),
+    ],
+)
+def test_allele_model_optionally_uses_multiplicative_x_s_z_mutations(
+    monkeypatch,
+    mutation_s,
+    mutation_z,
+    expected_alleles,
+):
+    """Multiply or divide each selected allele when the optional mode is enabled."""
+    model = Model_alleles(make_settings(
+        N_alleles=1,
+        max_population=3,
+        mature_age=2,
+        fecundity=1.0,
+        mutation_probability=1.0,
+        mutation_x=1.0,
+        mutation_s=mutation_s,
+        mutation_z=mutation_z,
+        use_multiplication=True,
+    ), torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 2.0, 2.0, 3.0],
+        [2.0, 4.0, 4.0, 8.0],
+    ]))
+    monkeypatch.setattr(
+        alleles_module.torch,
+        "randperm",
+        lambda count, device=None: torch.arange(count, device=device),
+    )
+    monkeypatch.setattr(
+        alleles_module.torch,
+        "randint",
+        lambda low, high, size, device=None: torch.zeros(
+            size,
+            dtype=torch.long,
+            device=device,
+        ),
+    )
+    monkeypatch.setattr(
+        alleles_module.torch,
+        "rand",
+        lambda size, device=None: torch.zeros(
+            size,
+            dtype=torch.float32,
+            device=device,
+        ),
+    )
+
+    assert model.apply_reproduction() == 1
+
+    child = model.population[-1]
+    torch.testing.assert_close(child[2:], torch.tensor(expected_alleles))
+    assert child[1].item() == pytest.approx(sum(expected_alleles) / 2.0)
+    assert Model_alleles.add_settings()["use_multiplication"]["default"] is False
+
+
+@pytest.mark.smoke
+def test_allele_model_skips_recalculation_after_simple_codomination_birth(monkeypatch):
+    """Keep the already correct phenotype when no dominance or delta is active."""
+    model = Model_alleles(make_settings(
+        N_alleles=1,
+        max_population=3,
+        mature_age=2,
+        fecundity=1.0,
+        mutation_probability=0.0,
+    ), torch.device("cpu"))
+    model._set_population(torch.tensor([
+        [2.0, 2.0, 2.0, 3.0],
+        [2.0, 4.0, 4.0, 8.0],
+    ]))
+    monkeypatch.setattr(
+        alleles_module.torch,
+        "randperm",
+        lambda count, device=None: torch.arange(count, device=device),
+    )
+    monkeypatch.setattr(
+        alleles_module.torch,
+        "randint",
+        lambda low, high, size, device=None: torch.zeros(
+            size,
+            dtype=torch.long,
+            device=device,
+        ),
+    )
+    monkeypatch.setattr(
+        model,
+        "_update_effective_beta",
+        lambda: pytest.fail("simple codominant reproduction recalculated beta"),
+    )
+
+    assert model.apply_reproduction() == 1
+    assert model.population[-1, 1].item() == pytest.approx(3.0)

@@ -50,6 +50,11 @@ is false, both alleles contribute. When it is true, the model also stores
 `dom1_i` and `dom2_i` and selects the beta belonging to the greater dominance
 value. The comparison is strict, so equality selects allele 2 consistently.
 
+`use_multiplication` selects the beta mutation rule. Its default false value
+retains additive X/S/Z shifts. When true, mutation instead multiplies or
+divides every selected beta allele using the multiplicative X/S/Z rule below.
+This option does not change mutation of dominance or delta values.
+
 `delta_x` controls whether delayed allele effects are active. With
 `delta_x = 0`, delta fields do not exist and beta is calculated only at birth.
 With `delta_x > 0`, the model stores `delta1_i` and `delta2_i`, mutates them
@@ -113,10 +118,25 @@ dominance fields and selects one allele from each pair.
 ## Mutation and constraints
 
 Each inherited allele is independently tested against `mutation_probability`.
-When selected, beta receives the inherited X/S/Z mutation shift. If present,
-the same mutation also changes dominance by a uniform shift from -0.5 to 0.5
-and changes delta by a signed uniform shift from 0 to `delta_x`, using
-`delta_reversion`.
+When `use_multiplication` is false, selected beta alleles receive the inherited
+additive X/S/Z mutation shift. When it is true, Z selects multiplication with
+probability:
+
+$$P(multiply) = (Z + 1) / 2$$
+
+The upward multiplier and downward divisor are:
+
+$$upward_multiplier = 1 + X * (S + 1)$$
+
+$$downward_divisor = 1 + X * (1 - S)$$
+
+Thus, a selected beta allele is multiplied by `upward_multiplier` or divided
+by `downward_divisor`. At $S = 0$, this is multiplication or division by
+$1 + X$. At $Z = 0$, either direction has probability $0.5$.
+
+If present, the same mutation also changes dominance by a uniform shift from
+-0.5 to 0.5 and changes delta by a signed uniform shift from 0 to `delta_x`,
+using `delta_reversion`.
 Dominance has no bounds; delta is clamped to zero after mutation.
 
 When `beta_only_positive` is enabled, inherited beta alleles are clamped at
@@ -153,6 +173,10 @@ to Python for output.
             },
             "use_dominance": {
                 "description": "Use the higher-dominance allele in each locus", "default": False,
+                "type": "bool",
+            },
+            "use_multiplication": {
+                "description": "Use multiplicative X/S/Z beta mutations instead of additive shifts", "default": False,
                 "type": "bool",
             },
         }
@@ -284,8 +308,28 @@ to Python for output.
             for side in range(2)
         ], dim=1)
         mutation_mask = torch.rand((births, 2, count), device=self.device) < self.settings["mutation_probability"]
-        shifts = sample_z_mutation_shifts(self.settings["mutation_x"], self.settings["mutation_s"], self.settings["mutation_z"], births * 2 * count, self.population.dtype, self.device).reshape(births, 2, count)
-        inherited += shifts * mutation_mask
+        if self.settings["use_multiplication"]:
+            multiply_mask = torch.rand(
+                (births, 2, count),
+                device=self.device,
+            ) < (self.settings["mutation_z"] / 2.0 + 0.5)
+            mutation_x = self.settings["mutation_x"]
+            mutation_s = self.settings["mutation_s"]
+            upward_multiplier = 1.0 + mutation_x * (mutation_s + 1.0)
+            downward_divisor = 1.0 + mutation_x * (1.0 - mutation_s)
+            factors = torch.where(
+                multiply_mask,
+                torch.full_like(inherited, upward_multiplier),
+                torch.full_like(inherited, 1.0 / downward_divisor),
+            )
+            inherited *= torch.where(
+                mutation_mask,
+                factors,
+                torch.ones_like(factors),
+            )
+        else:
+            shifts = sample_z_mutation_shifts(self.settings["mutation_x"], self.settings["mutation_s"], self.settings["mutation_z"], births * 2 * count, self.population.dtype, self.device).reshape(births, 2, count)
+            inherited += shifts * mutation_mask
         if self.settings.get("beta_only_positive", False):
             inherited.clamp_(min=0.0)
         child_fields = [torch.zeros((births, 1), dtype=self.population.dtype, device=self.device), inherited[:, 0], inherited[:, 1]]
@@ -311,7 +355,8 @@ to Python for output.
         beta_effective = inherited.reshape(births, -1).mean(dim=1, keepdim=True)
         children = torch.cat([child_fields[0], beta_effective, *[field.reshape(births, -1) for field in child_fields[1:]]], dim=1)
         self.population = torch.cat([self.population, children], dim=0)
-        self._update_effective_beta()
+        if self.settings["use_dominance"] or self.settings["delta_x"] != 0.0:
+            self._update_effective_beta()
         self.last_born = births
         return births
 

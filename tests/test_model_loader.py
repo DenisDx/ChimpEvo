@@ -92,6 +92,11 @@ def test_project_discovery_includes_default_model():
         load_model_class("model_base_diploid", project_root).__name__
         == "Model_base_diploid"
     )
+    assert "model_base_diploid_m" in discover_models(project_root)
+    assert (
+        load_model_class("model_base_diploid_m", project_root).__name__
+        == "Model_base_diploid_m"
+    )
     assert "model_alleles" in discover_models(project_root)
     assert load_model_class("model_alleles", project_root).__name__ == "Model_alleles"
 
@@ -107,6 +112,7 @@ def test_bundled_models_expose_explicit_structured_descriptions():
         "model_base_fecundity_m": "# Fixed-fecundity beta model with multiplicative mutations",
         "model_base_z": "# Fast fixed-fecundity beta model with mutation sign bias Z",
         "model_base_diploid": "# Diploid beta model",
+        "model_base_diploid_m": "# Diploid beta model with multiplicative mutations",
         "model_alleles": "# Multi-locus diploid beta model",
     }
 
