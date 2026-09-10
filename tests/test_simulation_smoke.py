@@ -98,6 +98,53 @@ def test_step_collects_current_v1_statistics(tmp_path, monkeypatch):
 
 
 @pytest.mark.smoke
+def test_before_iter_receives_previous_csv_values_and_mutable_config(tmp_path, monkeypatch):
+    """Expose iteration inputs and accept configuration changes from before_iter."""
+    monkeypatch.chdir(tmp_path)
+    interpreters = []
+
+    class FakeInterpreter:
+        """Capture pre-iteration symbols without requiring the optional package."""
+
+        def __init__(self, usersyms):
+            """Store symbols provided by the simulation hook."""
+            self.usersyms = usersyms
+            self.error = []
+            interpreters.append(self)
+
+        def __call__(self, code):
+            """Apply a representative configuration mutation."""
+            self.usersyms["config"]["stop_beta_change_threshold"] = 0.05
+
+    monkeypatch.setattr(main_module, "Interpreter", FakeInterpreter)
+    simulation = PopulationSimulation(make_settings(
+        before_iter="config['stop_beta_change_threshold'] = 0.05",
+    ))
+    simulation._generate_year_graphs = Mock()
+
+    simulation.step()
+    simulation.step()
+
+    assert simulation.settings["stop_beta_change_threshold"] == 0.05
+    assert interpreters[0].usersyms["iteration"] == 0
+    assert interpreters[0].usersyms["values"] == {}
+    assert interpreters[1].usersyms["iteration"] == 1
+    assert interpreters[1].usersyms["values"]["year"] == 0
+    assert interpreters[1].usersyms["count"] == 4
+
+
+@pytest.mark.smoke
+def test_before_iter_requires_optional_asteval_only_when_configured(tmp_path, monkeypatch):
+    """Fail with an installation warning only for configured advanced code."""
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(main_module, "Interpreter", None)
+    simulation = PopulationSimulation(make_settings(before_iter="config['lambda'] = 0.05"))
+
+    with pytest.raises(RuntimeError, match="requires asteval.*may be unsafe"):
+        simulation.step()
+
+
+@pytest.mark.smoke
 def test_run_reports_each_generated_graph_frame(tmp_path, monkeypatch):
     """Report the year whenever a simulation generates a graph frame."""
     monkeypatch.chdir(tmp_path)

@@ -36,6 +36,15 @@ def test_allele_model_declares_dynamic_private_schema():
 
 
 @pytest.mark.smoke
+def test_allele_model_declares_delta_and_age_evolution_graphs():
+    """Expose the shared delta and age time graphs through model metadata."""
+    graphs = {graph["filename"]: graph for graph in Model_alleles.add_graphs()}
+
+    assert graphs["delta_evolution"]["values"] == ["avg_delta", "delta_min", "delta_max"]
+    assert graphs["age_evolution"]["values"] == ["avg_age", "avg_oldest_death_age"]
+
+
+@pytest.mark.smoke
 def test_allele_model_initializes_homozygous_loci_and_zero_optional_values():
     """Set initial beta loci homogeneously with zero dominance and delta values."""
     model = Model_alleles(make_settings(N_alleles=2, use_dominance=True, delta_x=1.0, beta_initial=0.25), torch.device("cpu"))
@@ -88,6 +97,8 @@ def test_allele_model_statistics_stay_scalar_and_memory_estimate_includes_option
     ]
     assert all(values[name] == 0.0 for name in standard_deviation_names)
     assert values["avg_delta"] == 0.0
+    assert values["delta_min"] == 0.0
+    assert values["delta_max"] == 0.0
     assert Model_alleles.get_estimated_memory_consumption(settings) == 10 * 14 * 4 * 2
 
 
@@ -114,6 +125,8 @@ def test_allele_standard_deviation_triples_match_without_dominance():
     assert values["avg_individual_allele_beta_standard_deviation"] == pytest.approx(
         values["avg_individual_recessive_allele_beta_standard_deviation"],
     )
+    assert values["dominant_allele_beta_avg"] == pytest.approx(4.5)
+    assert values["recessive_allele_beta_avg"] == pytest.approx(4.5)
 
 
 @pytest.mark.smoke
@@ -150,12 +163,17 @@ def test_allele_model_reports_dominant_and_recessive_beta_and_delta_extremes():
 
     assert values["dominant_allele_beta_min"] == 1.0
     assert values["dominant_allele_beta_max"] == 7.0
+    assert values["dominant_allele_beta_avg"] == pytest.approx(4.0)
     assert values["recessive_allele_beta_min"] == 3.0
     assert values["recessive_allele_beta_max"] == 5.0
+    assert values["recessive_allele_beta_avg"] == pytest.approx(4.0)
     assert values["dominant_delta_max"] == 8.0
     assert values["recessive_delta_max"] == 6.0
     assert values["dominant_delta_mean"] == pytest.approx(5.0)
     assert values["recessive_delta_mean"] == pytest.approx(5.0)
+    assert values["avg_delta"] == pytest.approx(5.0)
+    assert values["delta_min"] == 2.0
+    assert values["delta_max"] == 8.0
 
 
 @pytest.mark.smoke

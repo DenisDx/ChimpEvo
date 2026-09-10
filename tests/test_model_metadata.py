@@ -2,6 +2,7 @@ import pytest
 
 from model import Model
 from model_base import Model_base
+from model_bitstring import Model_bitstring
 from metadata import ModelMetadataError, validate_model_metadata
 
 
@@ -54,17 +55,29 @@ def test_model_base_declares_current_biological_settings():
 
 
 @pytest.mark.smoke
+def test_bitstring_metadata_uses_fixed_dominance_and_delta_settings():
+    """Expose central beta and delta initialization without optional allele modes."""
+    settings = validate_model_metadata(Model_bitstring)["settings"]
+
+    assert {"beta_initial", "beta_only_positive", "use_dominance", "use_multiplication"}.isdisjoint(settings)
+    assert settings["beta_central"]["default"] == 2.7
+    assert settings["delta_initial"]["default"] == 20.0
+
+
+@pytest.mark.smoke
 def test_model_base_declares_beta_distribution_and_time_graphs():
     """Expose age and beta dynamic graph declarations for the default model."""
     graphs = validate_model_metadata(Model_base)["graphs"]
 
     assert [graph["filename"] for graph in graphs] == [
-        "age_distribution", "beta_distribution", "beta_evolution",
+        "age_distribution", "beta_distribution", "beta_evolution", "age_evolution",
     ]
     assert graphs[1]["type"] == "distr"
     assert graphs[1]["values"] == ["beta"]
     assert graphs[2]["type"] == "time"
     assert graphs[2]["values"] == ["avg_beta", "avg_beta_ema"]
+    assert graphs[3]["type"] == "time"
+    assert graphs[3]["values"] == ["avg_age", "avg_oldest_death_age"]
 
 
 @pytest.mark.smoke

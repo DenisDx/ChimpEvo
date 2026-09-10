@@ -1,4 +1,5 @@
 import tkinter as tk
+from tkinter import ttk
 import json
 from pathlib import Path
 
@@ -215,6 +216,31 @@ def test_gui_constructs_and_updates_valid_settings(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_edits_before_iter_in_advanced_settings(gui_app, monkeypatch):
+    """Apply before_iter code through the modal advanced settings editor."""
+    code = "if iteration > 10000:\n    config['lambda'] = 0.05"
+
+    def enter_code(dialog):
+        """Enter code and confirm the dialog with its OK action."""
+        editor = next(
+            widget for widget in _dialog_descendants(dialog)
+            if isinstance(widget, tk.Text)
+        )
+        editor.insert("1.0", code)
+        next(
+            widget for widget in _dialog_descendants(dialog)
+            if isinstance(widget, ttk.Button) and widget.cget("text") == "OK"
+        ).invoke()
+
+    _stub_modal_dialog(gui_app, monkeypatch, enter_code)
+    gui_app._on_advanced_settings()
+
+    assert gui_app.config["before_iter"] == code
+    assert gui_app.advanced_settings_status_var.get() == "before_iter"
+    assert gui_app.is_config_dirty is True
+
+
+@pytest.mark.smoke
 def test_gui_renders_boolean_model_settings_as_checkboxes(gui_app):
     """Use a checkbox and BooleanVar for supported boolean model settings."""
     row = gui_app.model_setting_rows["beta_only_positive"]
@@ -423,9 +449,11 @@ def test_gui_graph_viewer_creates_legacy_and_dynamic_tabs(gui_app):
     """Create one legacy viewer tab and one tab for each declared model graph."""
     tab_titles = [gui_app.graph_notebook.tab(tab_id, "text") for tab_id in gui_app.graph_notebook.tabs()]
 
-    assert tab_titles == ["Legacy", "Age Distribution", "Beta Distribution", "Beta Evolution"]
+    assert tab_titles == [
+        "Legacy", "Age Distribution", "Beta Distribution", "Beta Evolution", "Age Evolution",
+    ]
     assert set(gui_app.dynamic_graph_canvases) == {
-        "age_distribution", "beta_distribution", "beta_evolution",
+        "age_distribution", "beta_distribution", "beta_evolution", "age_evolution",
     }
 
 

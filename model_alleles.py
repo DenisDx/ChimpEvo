@@ -152,7 +152,7 @@ each animal. Each form is reported for all, dominant, and recessive alleles.
 When dominance is disabled, all three variants use all beta alleles and are
 equal. Standard deviations use float64 reductions on the selected Torch device
 to avoid float32 variance overflow from large multiplicative mutation outliers.
-It also reports raw beta minima and maxima separately for dominant and
+It also reports raw beta means, minima, and maxima separately for dominant and
 recessive alleles. Delta mode reports dominant and recessive delta means and
 maxima, mean delta, and the mean count of high-delta alleles. Only final scalar
 results are moved to Python for output.
@@ -214,17 +214,38 @@ results are moved to Python for output.
             "avg_individual_recessive_allele_beta_standard_deviation": {"title": "Average individual recessive allele beta standard deviation", "annual": True, "final": True, "format": ".6f"},
             "dominant_allele_beta_min": {"title": "Dominant allele beta minimum", "annual": True, "final": True, "format": ".6f"},
             "dominant_allele_beta_max": {"title": "Dominant allele beta maximum", "annual": True, "final": True, "format": ".6f"},
+            "dominant_allele_beta_avg": {"title": "Dominant allele beta average", "annual": True, "final": True, "format": ".6f"},
             "recessive_allele_beta_min": {"title": "Recessive allele beta minimum", "annual": True, "final": True, "format": ".6f"},
             "recessive_allele_beta_max": {"title": "Recessive allele beta maximum", "annual": True, "final": True, "format": ".6f"},
+            "recessive_allele_beta_avg": {"title": "Recessive allele beta average", "annual": True, "final": True, "format": ".6f"},
             "avg_dominance": {"title": "Average dominance", "annual": True, "final": True, "format": ".4f"},
             "dominance_variance": {"title": "Dominance variance", "annual": True, "final": True, "format": ".6f"},
             "avg_delta": {"title": "Average delta", "annual": True, "final": True, "format": ".4f"},
+            "delta_min": {"title": "Minimum delta", "annual": True, "final": True, "format": ".4f"},
+            "delta_max": {"title": "Maximum delta", "annual": True, "final": True, "format": ".4f"},
             "avg_high_delta_alleles": {"title": "Average high-delta alleles", "annual": True, "final": True, "format": ".4f"},
             "dominant_delta_max": {"title": "Dominant delta maximum", "annual": True, "final": True, "format": ".4f"},
             "recessive_delta_max": {"title": "Recessive delta maximum", "annual": True, "final": True, "format": ".4f"},
             "dominant_delta_mean": {"title": "Dominant delta mean", "annual": True, "final": True, "format": ".4f"},
             "recessive_delta_mean": {"title": "Recessive delta mean", "annual": True, "final": True, "format": ".4f"},
         }
+
+    @staticmethod
+    def add_graphs():
+        """Declare inherited graphs plus the delta evolution time graph."""
+        return [
+            *Model_base_z.add_graphs(),
+            {
+                "filename": "delta_evolution",
+                "title": "Delta Evolution",
+                "values": ["avg_delta", "delta_min", "delta_max"],
+                "labels": ["Average delta", "Minimum delta", "Maximum delta"],
+                "type": "time",
+                "annual": True,
+                "final": True,
+                "animated": True,
+            },
+        ]
 
     @staticmethod
     def get_estimated_memory_consumption(config):
@@ -245,19 +266,67 @@ results are moved to Python for output.
         """Return one population-by-locus dynamic allele tensor view."""
         return self.population[:, self._columns(prefix)]
 
+    def _uses_dominance(self):
+        """Return whether allele dominance selects one beta per locus."""
+        return self.settings["use_dominance"]
+
+    def _uses_delta(self):
+        """Return whether allele delta values affect the effective beta."""
+        return self.settings["delta_x"] != 0.0
+
+    def _uses_multiplication(self):
+        """Return whether beta mutations multiply inherited beta alleles."""
+        return self.settings["use_multiplication"]
+
+    def _clamps_effective_beta(self):
+        """Return whether negative effective beta contributions are clamped."""
+        return self.settings.get("beta_only_positive", False)
+
+    def _mutate_beta_alleles(self, inherited, mutation_mask):
+        """Mutate inherited beta alleles using the configured additive or multiplicative rule."""
+        if self._uses_multiplication():
+            multiply_mask = torch.rand(
+                inherited.shape,
+                device=self.device,
+            ) < (self.settings["mutation_z"] / 2.0 + 0.5)
+            mutation_x = self.settings["mutation_x"]
+            mutation_s = self.settings["mutation_s"]
+            upward_multiplier = 1.0 + mutation_x * (mutation_s + 1.0)
+            downward_divisor = 1.0 + mutation_x * (1.0 - mutation_s)
+            factors = torch.where(
+                multiply_mask,
+                torch.full_like(inherited, upward_multiplier),
+                torch.full_like(inherited, 1.0 / downward_divisor),
+            )
+            inherited *= torch.where(
+                mutation_mask,
+                factors,
+                torch.ones_like(factors),
+            )
+            return
+        shifts = sample_z_mutation_shifts(
+            self.settings["mutation_x"],
+            self.settings["mutation_s"],
+            self.settings["mutation_z"],
+            inherited.numel(),
+            inherited.dtype,
+            self.device,
+        ).reshape_as(inherited)
+        inherited += shifts * mutation_mask
+
     def _selected_alleles(self):
         """Return effective per-locus beta and optional matching delta tensors."""
         beta1 = self._alleles("beta1")
         beta2 = self._alleles("beta2")
-        if self.settings["use_dominance"]:
+        if self._uses_dominance():
             choose_first = self._alleles("dom1") > self._alleles("dom2")
             betas = torch.where(choose_first, beta1, beta2)
             deltas = None
-            if self.settings["delta_x"] != 0.0:
+            if self._uses_delta():
                 deltas = torch.where(choose_first, self._alleles("delta1"), self._alleles("delta2"))
             return betas, deltas
         betas = torch.cat([beta1, beta2], dim=1)
-        if self.settings["delta_x"] == 0.0:
+        if not self._uses_delta():
             return betas, None
         return betas, torch.cat([self._alleles("delta1"), self._alleles("delta2")], dim=1)
 
@@ -274,10 +343,10 @@ results are moved to Python for output.
                 betas * (ages - deltas) / torch.where(nonzero_age, ages, torch.ones_like(ages)),
                 torch.where(deltas > 0.0, torch.zeros_like(betas), betas),
             )
-            if self.settings.get("beta_only_positive", False):
+            if self._clamps_effective_beta():
                 contributions.clamp_(min=0.0)
             effective = contributions.mean(dim=1)
-        if self.settings.get("beta_only_positive", False):
+        if self._clamps_effective_beta():
             effective.clamp_(min=0.0)
         self.population[:, self.population_fields["beta"]] = effective
 
@@ -290,10 +359,10 @@ results are moved to Python for output.
         ages = torch.randint(0, int(self.settings["initial_age_max"]) + 1, (population_size,), dtype=torch.float32, device=self.device)
         beta = torch.full((population_size, count), float(self.settings["beta_initial"]), dtype=torch.float32, device=self.device)
         columns = [ages, beta.mean(dim=1), beta, beta]
-        if self.settings["use_dominance"]:
+        if self._uses_dominance():
             dominance = torch.zeros((population_size, count), dtype=torch.float32, device=self.device)
             columns.extend([dominance, dominance])
-        if self.settings["delta_x"] != 0.0:
+        if self._uses_delta():
             delta = torch.full((population_size, count), DELTA_INITIAL_MAX, dtype=torch.float32, device=self.device)
             columns.extend([delta, delta])
         self.avg_beta_ema = None
@@ -324,33 +393,12 @@ results are moved to Python for output.
             for side in range(2)
         ], dim=1)
         mutation_mask = torch.rand((births, 2, count), device=self.device) < self.settings["mutation_probability"]
-        if self.settings["use_multiplication"]:
-            multiply_mask = torch.rand(
-                (births, 2, count),
-                device=self.device,
-            ) < (self.settings["mutation_z"] / 2.0 + 0.5)
-            mutation_x = self.settings["mutation_x"]
-            mutation_s = self.settings["mutation_s"]
-            upward_multiplier = 1.0 + mutation_x * (mutation_s + 1.0)
-            downward_divisor = 1.0 + mutation_x * (1.0 - mutation_s)
-            factors = torch.where(
-                multiply_mask,
-                torch.full_like(inherited, upward_multiplier),
-                torch.full_like(inherited, 1.0 / downward_divisor),
-            )
-            inherited *= torch.where(
-                mutation_mask,
-                factors,
-                torch.ones_like(factors),
-            )
-        else:
-            shifts = sample_z_mutation_shifts(self.settings["mutation_x"], self.settings["mutation_s"], self.settings["mutation_z"], births * 2 * count, self.population.dtype, self.device).reshape(births, 2, count)
-            inherited += shifts * mutation_mask
+        self._mutate_beta_alleles(inherited, mutation_mask)
         if self.settings.get("beta_only_positive", False):
             inherited.clamp_(min=0.0)
         child_fields = [torch.zeros((births, 1), dtype=self.population.dtype, device=self.device), inherited[:, 0], inherited[:, 1]]
         for prefix in ("dom", "delta"):
-            enabled = prefix == "dom" and self.settings["use_dominance"] or prefix == "delta" and self.settings["delta_x"] != 0.0
+            enabled = prefix == "dom" and self._uses_dominance() or prefix == "delta" and self._uses_delta()
             if not enabled:
                 continue
             pairs = torch.stack([self._alleles(f"{prefix}1"), self._alleles(f"{prefix}2")], dim=2)
@@ -371,14 +419,14 @@ results are moved to Python for output.
         beta_effective = inherited.reshape(births, -1).mean(dim=1, keepdim=True)
         children = torch.cat([child_fields[0], beta_effective, *[field.reshape(births, -1) for field in child_fields[1:]]], dim=1)
         self.population = torch.cat([self.population, children], dim=0)
-        if self.settings["use_dominance"] or self.settings["delta_x"] != 0.0:
+        if self._uses_dominance() or self._uses_delta():
             self._update_effective_beta()
         self.last_born = births
         return births
 
     def apply_mortality(self):
         """Refresh delta-dependent beta immediately before inherited mortality."""
-        if self.settings["delta_x"] != 0.0:
+        if self._uses_delta():
             self._update_effective_beta()
         return super().apply_mortality()
 
@@ -394,11 +442,15 @@ results are moved to Python for output.
             "avg_individual_recessive_allele_beta_standard_deviation": None,
             "dominant_allele_beta_min": None,
             "dominant_allele_beta_max": None,
+            "dominant_allele_beta_avg": None,
             "recessive_allele_beta_min": None,
             "recessive_allele_beta_max": None,
+            "recessive_allele_beta_avg": None,
             "avg_dominance": None,
             "dominance_variance": None,
-            "avg_delta": None,
+            "avg_delta": 0.0,
+            "delta_min": 0.0,
+            "delta_max": 0.0,
             "avg_high_delta_alleles": None,
             "dominant_delta_max": None,
             "recessive_delta_max": None,
@@ -412,7 +464,7 @@ results are moved to Python for output.
         beta1 = self._alleles("beta1")
         beta2 = self._alleles("beta2")
         all_betas = torch.cat([beta1, beta2], dim=1).to(torch.float64)
-        if self.settings["use_dominance"]:
+        if self._uses_dominance():
             choose_first = self._alleles("dom1") > self._alleles("dom2")
             dominant_betas = torch.where(choose_first, beta1, beta2).to(torch.float64)
             recessive_betas = torch.where(choose_first, beta2, beta1).to(torch.float64)
@@ -421,8 +473,10 @@ results are moved to Python for output.
             recessive_betas = all_betas
         values["dominant_allele_beta_min"] = dominant_betas.min().item()
         values["dominant_allele_beta_max"] = dominant_betas.max().item()
+        values["dominant_allele_beta_avg"] = dominant_betas.mean().item()
         values["recessive_allele_beta_min"] = recessive_betas.min().item()
         values["recessive_allele_beta_max"] = recessive_betas.max().item()
+        values["recessive_allele_beta_avg"] = recessive_betas.mean().item()
         standard_deviation_sets = {
             "allele_beta_standard_deviation": all_betas,
             "dominant_allele_beta_standard_deviation": dominant_betas,
@@ -437,16 +491,16 @@ results are moved to Python for output.
         }
         for name, betas in individual_standard_deviation_sets.items():
             values[name] = torch.std(betas, dim=1, correction=0).mean().item()
-        if self.settings["use_dominance"]:
+        if self._uses_dominance():
             dominance = torch.cat([self._alleles("dom1"), self._alleles("dom2")], dim=1)
             dominance_variance, average_dominance = torch.var_mean(dominance, correction=0)
             values["avg_dominance"] = average_dominance.item()
             values["dominance_variance"] = dominance_variance.item()
-        if self.settings["delta_x"] != 0.0:
+        if self._uses_delta():
             delta1 = self._alleles("delta1")
             delta2 = self._alleles("delta2")
             deltas = torch.cat([delta1, delta2], dim=1)
-            if self.settings["use_dominance"]:
+            if self._uses_dominance():
                 choose_first = self._alleles("dom1") > self._alleles("dom2")
                 dominant_deltas = torch.where(choose_first, delta1, delta2)
                 recessive_deltas = torch.where(choose_first, delta2, delta1)
@@ -454,6 +508,8 @@ results are moved to Python for output.
                 dominant_deltas = deltas
                 recessive_deltas = deltas
             values["avg_delta"] = deltas.mean().item()
+            values["delta_min"] = deltas.min().item()
+            values["delta_max"] = deltas.max().item()
             threshold = self.settings["delta_reversion"] * 0.5 if self.settings["delta_reversion"] else 0.0
             values["avg_high_delta_alleles"] = (deltas > threshold).sum(dim=1).float().mean().item()
             values["dominant_delta_max"] = dominant_deltas.max().item()

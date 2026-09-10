@@ -99,6 +99,8 @@ def test_project_discovery_includes_default_model():
     )
     assert "model_alleles" in discover_models(project_root)
     assert load_model_class("model_alleles", project_root).__name__ == "Model_alleles"
+    assert "model_bitstring" in discover_models(project_root)
+    assert load_model_class("model_bitstring", project_root).__name__ == "Model_bitstring"
 
 
 @pytest.mark.smoke
@@ -114,6 +116,7 @@ def test_bundled_models_expose_explicit_structured_descriptions():
         "model_base_diploid": "# Diploid beta model",
         "model_base_diploid_m": "# Diploid beta model with multiplicative mutations",
         "model_alleles": "# Multi-locus diploid beta model",
+        "model_bitstring": "# Bit-string-inspired delayed beta model",
     }
 
     placeholder = Model.description()

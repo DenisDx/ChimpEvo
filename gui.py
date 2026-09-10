@@ -49,6 +49,15 @@ CORE_SETTING_NAMES = (
     "max_iterations",
 )
 
+BEFORE_ITER_DESCRIPTION = (
+    "Optional Python code executed before every simulation iteration. It receives "
+    "config (a mutable configuration dictionary), values (the previous CSV row), "
+    "all previous CSV columns as variables, and iteration. Example:\n\n"
+    "if iteration > 10000:\n"
+    "    config['lambda'] = 0.05\n\n"
+    "This code requires the optional asteval package and can be unsafe."
+)
+
 BUTTON_TOOLTIPS = {
     "New Experiment": "Create an experiment from the selected model defaults.",
     "Clone...": "Clone the active experiment's saved configuration and optional results.",
@@ -763,6 +772,29 @@ class SimulationGUI:
             )
             for widget in self.core_setting_widgets[name]:
                 self.tooltips.register(widget, description)
+
+        advanced_row = len(CORE_SETTING_NAMES)
+        self.advanced_settings_status_var = tk.StringVar()
+        ttk.Button(
+            core_frame,
+            text="Advanced Settings...",
+            command=self._on_advanced_settings,
+        ).grid(row=advanced_row, column=0, sticky=tk.W, pady=(8, 0))
+        self.advanced_settings_status_label = ttk.Label(
+            core_frame,
+            textvariable=self.advanced_settings_status_var,
+            foreground="gray",
+        )
+        self.advanced_settings_status_label.grid(
+            row=advanced_row,
+            column=1,
+            columnspan=3,
+            padx=5,
+            pady=(8, 0),
+            sticky=tk.W,
+        )
+        self.tooltips.register(self.advanced_settings_status_label, BEFORE_ITER_DESCRIPTION)
+        self._update_advanced_settings_status()
 
         self._update_memory_estimate()
 
@@ -2588,8 +2620,59 @@ class SimulationGUI:
                 var.set(str(self.config.get(param, DEFAULT_SETTINGS.get(param, ""))))
             for name, row in self.model_setting_rows.items():
                 row["value"].set(str(self.config.get(name, "")))
+            self._update_advanced_settings_status()
         finally:
             self._loading_ui = False
+
+    def _update_advanced_settings_status(self):
+        """Show which non-empty advanced configuration fields are active."""
+        if not hasattr(self, "advanced_settings_status_var"):
+            return
+        labels = ["before_iter"] if self.config.get("before_iter", "").strip() else []
+        self.advanced_settings_status_var.set(
+            ", ".join(labels) if labels else "(empty)"
+        )
+
+    def _on_advanced_settings(self):
+        """Edit optional advanced configuration values in a modal dialog."""
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Advanced Settings")
+        dialog.geometry("720x520")
+        dialog.minsize(560, 400)
+        dialog.transient(self.root)
+        dialog.columnconfigure(0, weight=1)
+        dialog.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            dialog,
+            text="before_iter",
+            font=("TkDefaultFont", 10, "bold"),
+        ).grid(row=0, column=0, sticky=tk.W, padx=12, pady=(12, 2))
+        editor = tk.Text(dialog, wrap=tk.NONE, undo=True)
+        editor.grid(row=1, column=0, sticky=tk.NSEW, padx=12, pady=(0, 6))
+        editor.insert("1.0", self.config.get("before_iter", ""))
+        ttk.Label(dialog, text=BEFORE_ITER_DESCRIPTION, justify=tk.LEFT, wraplength=680).grid(
+            row=2, column=0, sticky=tk.W, padx=12, pady=(0, 8),
+        )
+
+        def apply():
+            """Store edited advanced code in the active configuration."""
+            before_iter = editor.get("1.0", "end-1c")
+            if before_iter != self.config.get("before_iter", ""):
+                self.config["before_iter"] = before_iter
+                self._set_config_dirty(True)
+                self._update_advanced_settings_status()
+            dialog.destroy()
+
+        buttons = ttk.Frame(dialog)
+        buttons.grid(row=3, column=0, sticky=tk.E, padx=12, pady=(0, 12))
+        ttk.Button(buttons, text="OK", command=apply).pack(side=tk.LEFT, padx=(0, 8))
+        ttk.Button(buttons, text="Cancel", command=dialog.destroy).pack(side=tk.LEFT)
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.bind("<Escape>", lambda event: dialog.destroy())
+        editor.focus_set()
+        dialog.grab_set()
+        self.root.wait_window(dialog)
 
     def _format_setting_bounds(self, metadata):
         """Return a human-readable inclusive range for one setting."""
@@ -2640,7 +2723,9 @@ class SimulationGUI:
             widget.destroy()
         self.model_setting_rows = {}
         active_settings = self.model_metadata["settings"]
-        excluded_names = set(CORE_SETTING_NAMES) | {"device", "model", "tag"}
+        excluded_names = set(CORE_SETTING_NAMES) | {
+            "before_iter", "device", "model", "tag",
+        }
         unsupported_names = sorted(
             set(self.config) - set(active_settings) - excluded_names,
         )

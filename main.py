@@ -17,6 +17,10 @@ matplotlib.use('Agg')  # Use non-GUI backend to avoid thread conflicts with tkin
 import matplotlib.pyplot as plt
 from PIL import Image
 import gc
+try:
+    from asteval import Interpreter
+except ImportError:
+    Interpreter = None
 from graph_style import clamp_values, render_series
 from settings import DEFAULT_SETTINGS, PARAMETER_RANGES
 from load_model import load_model_class
@@ -69,6 +73,7 @@ def validate_runtime_config(settings, model_class=None):
         raise TypeError("Configuration must be a JSON object")
     settings.setdefault("min_iterations", DEFAULT_SETTINGS["min_iterations"])
     settings.setdefault("beta_only_positive", False)
+    settings.setdefault("before_iter", DEFAULT_SETTINGS["before_iter"])
     for name in ("model", "tag", "device", *CORE_RUNTIME_SETTINGS):
         if name not in settings:
             raise ValueError(f"Missing required setting: {name}")
@@ -171,6 +176,29 @@ class PopulationSimulation:
         
         self._prepare_output_dir()
         self._init_population()
+
+    def _run_before_iter(self):
+        """Execute configured pre-iteration code with config, prior values, and iteration."""
+        code = self.settings.get("before_iter", "")
+        if not code:
+            return
+        if Interpreter is None:
+            raise RuntimeError(
+                "before_iter requires asteval. Install it with: pip install asteval. "
+                "Warning: before_iter executes user-provided Python code and may be unsafe."
+            )
+        previous_values = dict(self.results[-1]) if self.results else {}
+        symbols = {
+            "config": self.settings,
+            "values": previous_values,
+            "iteration": self.year,
+            **previous_values,
+        }
+        interpreter = Interpreter(usersyms=symbols)
+        interpreter(code)
+        if interpreter.error:
+            messages = "; ".join(error.get_error()[1] for error in interpreter.error)
+            raise RuntimeError(f"before_iter failed at iteration {self.year}: {messages}")
 
     def _validate_settings(self):
         """Clamp configured numeric values to their supported ranges."""
@@ -610,6 +638,8 @@ class PopulationSimulation:
         """Execute one year and honor an optional successful-finalization request."""
         if self.model.get_population_size() == 0:
             return False
+
+        self._run_before_iter()
 
         # Track processed animals for speed metric
         self.total_animals_processed += self.model.get_population_size()

@@ -8,6 +8,7 @@ models, and any other brief operational notes.
 - **Purpose:** Baseline beta/Gompertz population model.
 - **Key settings:** Population, mortality, mutation, maturity, and fecundity settings.
 - **Difference:** Reproduction samples mature parents with replacement; one animal may participate in any number of births during a year.
+- **Age evolution:** Renders an annual/final `age_evolution` graph with average population age and average oldest-subset death age. It appears in the Progress window for every beta-based model.
 
 ## model_base_fast
 
@@ -58,5 +59,16 @@ models, and any other brief operational notes.
 - **Beta mutation:** `use_multiplication=false` retains additive X/S/Z shifts. When true, $Z$ selects multiplication with probability $(Z+1)/2$; a beta allele is multiplied by $1+X(S+1)$ or divided by $1+X(1-S)$.
 - **Phenotype:** Without delta, public beta is the mean of all alleles or the selected dominant allele per pair. With delta, the model recalculates an effective beta before mortality from $beta_i(t-delta_i)/t$. This is an effective-beta approximation, not an average of per-allele mortality probabilities.
 - **Allele variation:** Reports six float64 standard deviations: all/dominant/recessive raw beta alleles across the whole population, plus the mean per-animal SD for each set. Without dominance, each all/dominant/recessive triple is equal.
-- **Allele extrema:** Reports raw beta minimum/maximum separately for dominant and recessive alleles. In delta mode it also reports dominant/recessive delta maximum and mean; without dominance, corresponding dominant and recessive values are equal.
+- **Allele extrema:** Reports raw beta mean/minimum/maximum separately for dominant and recessive alleles. In delta mode it also reports dominant/recessive delta maximum and mean; without dominance, corresponding dominant and recessive values are equal.
+- **Delta evolution:** Renders an annual/final `delta_evolution` graph with the all-allele average, minimum, and maximum delta. When delta is disabled, the three CSV values and graph series are zero.
 - **Compatibility:** The public `age` and `beta` fields remain first; all dynamic allele fields are private and are not written as CSV columns.
+
+## model_bitstring
+
+- **Purpose:** A bit-string-inspired model for studying evolution of delayed dominant beta effects and the resulting effective Gompertz beta.
+- **Key settings:** `N_alleles`, `beta_central`, `delta_initial`, `delta_x`, `delta_reversion`, and inherited mutation/fecundity/mortality settings.
+- **Allele state:** Every locus always has two beta, dominance, and delta alleles. The stricter comparison `dom1 > dom2` selects beta/delta 1; ties select allele 2.
+- **Beta mutation:** An unmutated allele inherits beta, dominance, and delta together. A mutated beta is reset from `beta_central`: it is multiplied by $1+X(S+1)$ with probability $(Z+1)/2$, otherwise divided by $1+X(1-S)$.
+- **Delayed effect:** At age $t$, each selected allele contributes $max(0, beta_i(t-delta_i)/t)$ to the mean effective beta. Its public `beta` value remains available to the normal beta graphs and CSV outputs.
+- **Delta evolution:** Inherits the `delta_evolution` graph of average, minimum, and maximum raw delta values over time.
+- **Relation to Penna:** This model is inspired by the age-triggered loci of the Penna Bit-String Model but uses continuous, reversible beta/dominance/delta values rather than binary irreversible mutations.

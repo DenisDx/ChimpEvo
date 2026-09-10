@@ -179,6 +179,16 @@ aging, and mortality in that order. Births are limited by mature population,
                 "final": True,
                 "animated": True,
             },
+            {
+                "filename": "age_evolution",
+                "title": "Age Evolution",
+                "values": ["avg_age", "avg_oldest_death_age"],
+                "labels": ["Average age", "Average oldest-subset death age"],
+                "type": "time",
+                "annual": True,
+                "final": True,
+                "animated": True,
+            },
         ]
 
     @staticmethod

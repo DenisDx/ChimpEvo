@@ -17,6 +17,7 @@ DEFAULT_SETTINGS = {
     "stop_beta_change_threshold": 0.1,  # multiplier for beta stabilization threshold
     "min_iterations": 0,  # minimum years before honoring model stop reasons
     "max_iterations": 100000,  # maximum simulation iterations before stopping
+    "before_iter": "",  # optional code executed before every simulation iteration
     "tag": "default",  # run identifier
     "device": "cuda",  # "cuda" or "cpu"
     "model": "model_base",  # dynamic model module name
@@ -62,6 +63,7 @@ PARAMETER_DESCRIPTIONS = {
     "stop_beta_change_threshold": "Beta stabilization multiplier",
     "min_iterations": "Minimum years before model-driven termination",
     "max_iterations": "Maximum simulation years",
+    "before_iter": "Optional advanced code executed before every simulation iteration",
     "device": "Compute device (CUDA or CPU)",
     "model": "Dynamic model module",
     "tag": "Result folder and run identifier",
