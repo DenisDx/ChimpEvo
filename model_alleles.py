@@ -278,6 +278,10 @@ results are moved to Python for output.
         """Return whether beta mutations multiply inherited beta alleles."""
         return self.settings["use_multiplication"]
 
+    def _uses_delta_multiplication(self):
+        """Return whether delta mutations multiply inherited delta alleles."""
+        return False
+
     def _clamps_effective_beta(self):
         """Return whether negative effective beta contributions are clamped."""
         return self.settings.get("beta_only_positive", False)
@@ -313,6 +317,25 @@ results are moved to Python for output.
             self.device,
         ).reshape_as(inherited)
         inherited += shifts * mutation_mask
+
+    def _mutate_delta_alleles(self, values, mutation_mask):
+        """Mutate inherited delta alleles toward the configured reversion value."""
+        magnitudes = torch.rand_like(values) * self.settings["delta_x"]
+        reversion = self.settings["delta_reversion"]
+        upward_probability = (
+            torch.full_like(values, 0.5)
+            if reversion == 0
+            else 0.5 * (1.0 - torch.clamp(values / reversion, max=1.0))
+        )
+        multiply_mask = torch.rand_like(values) < upward_probability
+        if self._uses_delta_multiplication():
+            factors = 1.0 + magnitudes / self.DELTA_X_DIVIDER_FOR_MULTIPLICATION
+            mutated = torch.where(multiply_mask, values * factors, values / factors)
+            values.copy_(torch.where(mutation_mask, mutated, values))
+        else:
+            signs = torch.where(multiply_mask, 1.0, -1.0)
+            values += signs * magnitudes * mutation_mask
+        values.clamp_(min=0.0)
 
     def _selected_alleles(self):
         """Return effective per-locus beta and optional matching delta tensors."""
@@ -409,12 +432,7 @@ results are moved to Python for output.
             if prefix == "dom":
                 values += (torch.rand_like(values) - 0.5) * mutation_mask
             else:
-                magnitudes = torch.rand_like(values) * self.settings["delta_x"]
-                reversion = self.settings["delta_reversion"]
-                upward_probability = torch.full_like(values, 0.5) if reversion == 0 else 0.5 * (1.0 - torch.clamp(values / reversion, max=1.0))
-                signs = torch.where(torch.rand_like(values) < upward_probability, 1.0, -1.0)
-                values += signs * magnitudes * mutation_mask
-                values.clamp_(min=0.0)
+                self._mutate_delta_alleles(values, mutation_mask)
             child_fields.extend([values[:, 0], values[:, 1]])
         beta_effective = inherited.reshape(births, -1).mean(dim=1, keepdim=True)
         children = torch.cat([child_fields[0], beta_effective, *[field.reshape(births, -1) for field in child_fields[1:]]], dim=1)

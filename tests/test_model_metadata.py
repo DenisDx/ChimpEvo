@@ -60,7 +60,8 @@ def test_bitstring_metadata_uses_fixed_dominance_and_delta_settings():
     """Expose central beta and delta initialization without optional allele modes."""
     settings = validate_model_metadata(Model_bitstring)["settings"]
 
-    assert {"beta_initial", "beta_only_positive", "use_dominance", "use_multiplication"}.isdisjoint(settings)
+    assert {"beta_initial", "beta_only_positive", "use_dominance"}.isdisjoint(settings)
+    assert settings["use_multiplication"]["default"] is False
     assert settings["beta_central"]["default"] == 2.7
     assert settings["delta_initial"]["default"] == 20.0
 

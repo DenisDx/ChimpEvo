@@ -25,11 +25,12 @@ def make_settings(**overrides):
 
 @pytest.mark.smoke
 def test_bitstring_model_declares_fixed_dominance_and_delta_schema():
-    """Always create dominance and delta fields while omitting legacy mode settings."""
+    """Always create dominance/delta fields and expose only the delta mutation mode."""
     settings = Model_bitstring.add_settings()
     fields = Model_bitstring.add_population_fields({"N_alleles": 1})
 
-    assert {"beta_initial", "beta_only_positive", "use_dominance", "use_multiplication"}.isdisjoint(settings)
+    assert {"beta_initial", "beta_only_positive", "use_dominance"}.isdisjoint(settings)
+    assert settings["use_multiplication"]["default"] is False
     assert settings["beta_central"]["default"] == 2.7
     assert settings["delta_initial"]["default"] == 20.0
     assert list(fields) == ["age", "beta", "beta1_0", "beta2_0", "dom1_0", "dom2_0", "delta1_0", "delta2_0"]
@@ -81,6 +82,27 @@ def test_bitstring_mutation_resets_beta_from_central_value(monkeypatch):
 
     assert inherited[0, 0, 0].item() == pytest.approx(4.0)
     assert inherited[0, 1, 0].item() == pytest.approx(99.0)
+
+
+@pytest.mark.smoke
+def test_bitstring_multiplies_or_divides_delta_toward_reversion(monkeypatch):
+    """Scale mutated deltas with the fixed divisor and reversion-biased direction."""
+    model = Model_bitstring(make_settings(
+        delta_x=20.0,
+        delta_reversion=20.0,
+        use_multiplication=True,
+    ), torch.device("cpu"))
+    random_values = iter([
+        torch.full((1, 3), 0.5),
+        torch.tensor([[0.0, 1.0, 0.0]]),
+    ])
+    monkeypatch.setattr(torch, "rand_like", lambda values: next(random_values).to(values.device))
+    deltas = torch.tensor([[5.0, 5.0, 5.0]])
+
+    model._mutate_delta_alleles(deltas, torch.tensor([[True, True, False]]))
+
+    assert Model_bitstring.DELTA_X_DIVIDER_FOR_MULTIPLICATION == 10.0
+    torch.testing.assert_close(deltas, torch.tensor([[10.0, 2.5, 5.0]]))
 
 
 @pytest.mark.smoke

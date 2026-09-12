@@ -9,6 +9,8 @@ from model_alleles import Model_alleles
 class Model_bitstring(Model_alleles):
     """Provide a bit-string-inspired model with mutable allele activation ages."""
 
+    DELTA_X_DIVIDER_FOR_MULTIPLICATION = 10.0
+
     @staticmethod
     def description():
         """Return the bit-string-inspired model description as lightweight Markdown."""
@@ -35,6 +37,8 @@ from `Model_alleles`.
 - Every allele has a delayed effect, including when `delta_x` is zero.
 - A beta mutation resets beta from the fixed `beta_central` value instead of
   modifying the inherited beta.
+- `use_multiplication` controls delta mutation only; beta always uses its
+    central-value multiplicative reset.
 - Negative pre-activation contributions are permanently clamped to zero.
 
 ## Effective beta
@@ -56,8 +60,11 @@ the allele state before mortality rather than inherited directly.
 
 Each child inherits one allele from each parent at every locus. Without
 mutation, beta, dominance, and delta are inherited together. With probability
-`mutation_probability`, dominance receives $Uniform(-0.5, 0.5)$ and delta
-receives its inherited signed, reversion-biased shift before clamping to zero.
+`mutation_probability`, dominance receives $Uniform(-0.5, 0.5)$. By default,
+delta receives its inherited signed, reversion-biased shift before clamping to
+zero. With `use_multiplication=true`, delta is multiplied or divided by a
+factor sampled from $[1, 1 + delta_x / 10)$ instead. Its probability of
+multiplication uses the same reversion bias as the additive upward shift.
 
 A beta mutation ignores the parental beta. With $P(multiply)=(Z+1)/2$:
 
@@ -87,9 +94,13 @@ that inherited deleterious effects activate only after locus-specific ages.
             "beta_initial",
             "beta_only_positive",
             "use_dominance",
-            "use_multiplication",
         ):
             settings.pop(name)
+        settings["use_multiplication"] = {
+            "description": "Use multiplicative delta mutations instead of additive shifts",
+            "default": False,
+            "type": "bool",
+        }
         settings["mutation_x"] = {
             "description": "Central-beta multiplicative mutation magnitude X",
             "default": 0.0,
@@ -154,6 +165,10 @@ that inherited deleterious effects activate only after locus-specific ages.
     def _uses_multiplication(self):
         """Return that beta mutations use multiplicative central-beta draws."""
         return True
+
+    def _uses_delta_multiplication(self):
+        """Return whether delta mutations multiply inherited delta alleles."""
+        return self.settings["use_multiplication"]
 
     def _clamps_effective_beta(self):
         """Return that inactive allele contributions never become negative."""

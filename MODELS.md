@@ -66,9 +66,10 @@ models, and any other brief operational notes.
 ## model_bitstring
 
 - **Purpose:** A bit-string-inspired model for studying evolution of delayed dominant beta effects and the resulting effective Gompertz beta.
-- **Key settings:** `N_alleles`, `beta_central`, `delta_initial`, `delta_x`, `delta_reversion`, and inherited mutation/fecundity/mortality settings.
+- **Key settings:** `N_alleles`, `beta_central`, `delta_initial`, `delta_x`, `delta_reversion`, `use_multiplication`, and inherited mutation/fecundity/mortality settings.
 - **Allele state:** Every locus always has two beta, dominance, and delta alleles. The stricter comparison `dom1 > dom2` selects beta/delta 1; ties select allele 2.
 - **Beta mutation:** An unmutated allele inherits beta, dominance, and delta together. A mutated beta is reset from `beta_central`: it is multiplied by $1+X(S+1)$ with probability $(Z+1)/2$, otherwise divided by $1+X(1-S)$.
+- **Delta mutation:** By default, delta uses the inherited additive reversion-biased shift. With `use_multiplication=true`, a mutated delta is multiplied or divided by a uniformly sampled factor in $[1, 1+delta_x/10)$; the existing proximity to `delta_reversion` determines the multiplication probability. This flag does not affect beta mutation.
 - **Delayed effect:** At age $t$, each selected allele contributes $max(0, beta_i(t-delta_i)/t)$ to the mean effective beta. Its public `beta` value remains available to the normal beta graphs and CSV outputs.
 - **Delta evolution:** Inherits the `delta_evolution` graph of average, minimum, and maximum raw delta values over time.
 - **Relation to Penna:** This model is inspired by the age-triggered loci of the Penna Bit-String Model but uses continuous, reversible beta/dominance/delta values rather than binary irreversible mutations.

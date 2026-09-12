@@ -310,6 +310,37 @@ def test_gui_progress_window_scrolls_vertically(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_progress_splitter_resizes_graphs_above_expanding_log(gui_app):
+    """Resize graphs above the unchanged details panels and keep the log at 200 pixels."""
+    gui_app.progress_window.geometry("1200x900")
+    gui_app._show_progress_window()
+    gui_app.root.update_idletasks()
+
+    assert tuple(map(str, gui_app.progress_paned.panes())) == (
+        str(gui_app.graph_notebook),
+        str(gui_app.progress_details_frame),
+    )
+    assert gui_app.progress_paned.panecget(gui_app.graph_notebook, "stretch") == "never"
+    assert gui_app.progress_paned.panecget(gui_app.progress_details_frame, "stretch") == "always"
+    assert gui_app.progress_log_frame.winfo_height() >= 200
+    initial_graph_height = gui_app.graph_notebook.winfo_height()
+    initial_log_height = gui_app.progress_log_frame.winfo_height()
+    initial_sash_y = gui_app.progress_paned.sash_coord(0)[1]
+
+    gui_app.progress_paned.sash_place(0, 0, initial_sash_y - 50)
+    gui_app.root.update_idletasks()
+
+    assert gui_app.graph_notebook.winfo_height() < initial_graph_height
+    assert gui_app.progress_log_frame.winfo_height() > initial_log_height
+    assert gui_app.progress_log_frame.winfo_height() >= 200
+
+    gui_app.progress_paned.sash_place(0, 0, gui_app.progress_paned.winfo_height())
+    gui_app.root.update_idletasks()
+
+    assert gui_app.progress_log_frame.winfo_height() >= 200
+
+
+@pytest.mark.smoke
 def test_gui_simulation_launch_shows_progress_and_enables_both_stop_buttons(gui_app, monkeypatch):
     """Open Progress automatically and synchronize its stop control at launch."""
     thread_starts = []

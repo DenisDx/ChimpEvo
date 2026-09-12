@@ -1316,8 +1316,9 @@ class SimulationGUI:
         self.progress_canvas.configure(yscrollcommand=progress_scrollbar.set)
         progress_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.progress_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        self.progress_content_min_height = 0
         progress_frame = ttk.Frame(self.progress_canvas, padding=5)
-        progress_window = self.progress_canvas.create_window(
+        self.progress_content_window = self.progress_canvas.create_window(
             (0, 0),
             window=progress_frame,
             anchor=tk.NW,
@@ -1330,15 +1331,32 @@ class SimulationGUI:
         )
         self.progress_canvas.bind(
             "<Configure>",
-            lambda event: self.progress_canvas.itemconfigure(progress_window, width=event.width),
+            self._resize_progress_content,
         )
         self._create_progress_content(progress_frame)
+        self.progress_window.update_idletasks()
+        self.progress_content_min_height = progress_frame.winfo_reqheight()
         self.progress_window.withdraw()
+
+    def _resize_progress_content(self, event):
+        """Fit Progress content to its viewport while retaining vertical overflow."""
+        self.progress_canvas.itemconfigure(
+            self.progress_content_window,
+            width=event.width,
+            height=max(event.height, self.progress_content_min_height),
+        )
 
     def _create_progress_content(self, parent):
         """Create progress graphs, statistics, controls, and log output."""
-        self.graph_notebook = ttk.Notebook(parent)
-        self.graph_notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.progress_paned = tk.PanedWindow(
+            parent,
+            orient=tk.VERTICAL,
+            sashrelief=tk.RAISED,
+            sashwidth=6,
+            borderwidth=0,
+        )
+        self.progress_paned.pack(fill=tk.BOTH, expand=True)
+        self.graph_notebook = ttk.Notebook(self.progress_paned)
         legacy_graph_frame = ttk.Frame(self.graph_notebook, padding=8)
         self.graph_notebook.add(legacy_graph_frame, text="Legacy")
         self.dynamic_graph_canvases = {}
@@ -1394,8 +1412,9 @@ class SimulationGUI:
             "<Configure>",
             lambda event: self._schedule_graph_rescale("betaoccurrence"),
         )
-        
-        calculation_frame = ttk.LabelFrame(parent, text="Current Calculation", padding=10)
+
+        self.progress_details_frame = ttk.Frame(self.progress_paned)
+        calculation_frame = ttk.LabelFrame(self.progress_details_frame, text="Current Calculation", padding=10)
         calculation_frame.pack(fill=tk.X, padx=5, pady=5)
         self.progress_tag_var = tk.StringVar(value="-")
         self.progress_source_var = tk.StringVar(value="No calculation")
@@ -1422,7 +1441,7 @@ class SimulationGUI:
         calculation_frame.columnconfigure(3, weight=1)
 
         # Performance statistics panel
-        stats_frame = ttk.LabelFrame(parent, text="Performance Statistics", padding=10)
+        stats_frame = ttk.LabelFrame(self.progress_details_frame, text="Performance Statistics", padding=10)
         stats_frame.pack(fill=tk.X, padx=5, pady=5)
         
         stats_grid = ttk.Frame(stats_frame)
@@ -1447,12 +1466,12 @@ class SimulationGUI:
         self.tooltips.register(self.stat_avg_element, "Average processing time per animal across completed years.")
         
         # Log output
-        log_frame = ttk.LabelFrame(parent, text="Log Output", padding=10)
-        log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.progress_log_frame = ttk.LabelFrame(self.progress_details_frame, text="Log Output", padding=10)
+        self.progress_log_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
 
         self.log_autoscroll_var = tk.BooleanVar(value=True)
         self.log_autoscroll_button = ttk.Checkbutton(
-            log_frame,
+            self.progress_log_frame,
             text="Auto-scroll log",
             variable=self.log_autoscroll_var,
         )
@@ -1461,7 +1480,7 @@ class SimulationGUI:
             self.log_autoscroll_button,
             "Keep the newest log message visible while calculations run.",
         )
-        log_body = ttk.Frame(log_frame)
+        log_body = ttk.Frame(self.progress_log_frame)
         log_body.pack(fill=tk.BOTH, expand=True)
         self.log_text = tk.Text(log_body, height=8, width=80, wrap=tk.WORD)
         self.log_text.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
@@ -1470,7 +1489,7 @@ class SimulationGUI:
         scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
         self.log_text.configure(yscrollcommand=scrollbar.set)
 
-        controls = ttk.Frame(parent)
+        controls = ttk.Frame(self.progress_details_frame)
         controls.pack(fill=tk.X, padx=5, pady=(0, 5))
         self.progress_stop_btn = ttk.Button(
             controls,
@@ -1486,6 +1505,18 @@ class SimulationGUI:
             state=tk.DISABLED,
         )
         self.progress_finalize_btn.pack(side=tk.RIGHT, padx=(0, 5))
+
+        self.progress_details_frame.update_idletasks()
+        fixed_details_height = (
+            self.progress_details_frame.winfo_reqheight()
+            - self.progress_log_frame.winfo_reqheight()
+        )
+        self.progress_paned.add(self.graph_notebook, minsize=150, stretch="never")
+        self.progress_paned.add(
+            self.progress_details_frame,
+            minsize=fixed_details_height + 200,
+            stretch="always",
+        )
 
     def _set_progress_calculation(self, tag, batch_row=None):
         """Display the current run tag and its default-config or batch-row source."""
