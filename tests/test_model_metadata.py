@@ -1,6 +1,7 @@
 import pytest
 
 from model import Model
+from model_alleles import Model_alleles
 from model_base import Model_base
 from model_bitstring import Model_bitstring
 from metadata import ModelMetadataError, validate_model_metadata
@@ -62,6 +63,16 @@ def test_bitstring_metadata_uses_fixed_dominance_and_delta_settings():
     assert {"beta_initial", "beta_only_positive", "use_dominance", "use_multiplication"}.isdisjoint(settings)
     assert settings["beta_central"]["default"] == 2.7
     assert settings["delta_initial"]["default"] == 20.0
+
+
+@pytest.mark.smoke
+@pytest.mark.parametrize("model_class", [Model_alleles, Model_bitstring])
+def test_delta_reversion_has_no_upper_bound(model_class):
+    """Allow every delta model to use reversion values above the former limit."""
+    setting = validate_model_metadata(model_class)["settings"]["delta_reversion"]
+
+    assert setting["min"] == 0.0
+    assert "max" not in setting
 
 
 @pytest.mark.smoke

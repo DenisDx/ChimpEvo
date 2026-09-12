@@ -1307,8 +1307,31 @@ class SimulationGUI:
         self.progress_window.title("Progress")
         self.progress_window.geometry("1200x900")
         self.progress_window.protocol("WM_DELETE_WINDOW", self._hide_progress_window)
-        progress_frame = ttk.Frame(self.progress_window, padding=5)
-        progress_frame.pack(fill=tk.BOTH, expand=True)
+        self.progress_canvas = tk.Canvas(self.progress_window, highlightthickness=0)
+        progress_scrollbar = ttk.Scrollbar(
+            self.progress_window,
+            orient=tk.VERTICAL,
+            command=self.progress_canvas.yview,
+        )
+        self.progress_canvas.configure(yscrollcommand=progress_scrollbar.set)
+        progress_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.progress_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        progress_frame = ttk.Frame(self.progress_canvas, padding=5)
+        progress_window = self.progress_canvas.create_window(
+            (0, 0),
+            window=progress_frame,
+            anchor=tk.NW,
+        )
+        progress_frame.bind(
+            "<Configure>",
+            lambda event: self.progress_canvas.configure(
+                scrollregion=self.progress_canvas.bbox("all"),
+            ),
+        )
+        self.progress_canvas.bind(
+            "<Configure>",
+            lambda event: self.progress_canvas.itemconfigure(progress_window, width=event.width),
+        )
         self._create_progress_content(progress_frame)
         self.progress_window.withdraw()
 

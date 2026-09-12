@@ -173,7 +173,7 @@ results are moved to Python for output.
             },
             "delta_reversion": {
                 "description": "Delta value where upward mutation probability reaches zero", "default": 12.0,
-                "type": "float", "min": 0.0, "max": 1000.0,
+                "type": "float", "min": 0.0,
             },
             "use_dominance": {
                 "description": "Use the higher-dominance allele in each locus", "default": False,

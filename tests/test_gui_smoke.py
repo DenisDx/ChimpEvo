@@ -293,6 +293,23 @@ def test_gui_uses_persistent_non_modal_progress_window(gui_app):
 
 
 @pytest.mark.smoke
+def test_gui_progress_window_scrolls_vertically(gui_app):
+    """Scroll Progress vertically when its content exceeds the window height."""
+    gui_app.progress_window.geometry("1200x300")
+    gui_app._show_progress_window()
+    gui_app.root.update_idletasks()
+
+    assert str(gui_app.progress_canvas.cget("yscrollcommand"))
+    assert gui_app.progress_canvas.bbox("all")[3] > gui_app.progress_canvas.winfo_height()
+    initial_position = gui_app.progress_canvas.yview()[0]
+
+    gui_app.progress_canvas.yview_scroll(1, tk.UNITS)
+    gui_app.root.update_idletasks()
+
+    assert gui_app.progress_canvas.yview()[0] > initial_position
+
+
+@pytest.mark.smoke
 def test_gui_simulation_launch_shows_progress_and_enables_both_stop_buttons(gui_app, monkeypatch):
     """Open Progress automatically and synchronize its stop control at launch."""
     thread_starts = []
